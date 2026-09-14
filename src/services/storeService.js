@@ -81,8 +81,8 @@ const setStorageItem = (key, value) => {
 const mapSupabaseProduct = (p, costsMap = null) => {
   const images = Array.isArray(p.product_images) && p.product_images.length > 0
     ? p.product_images
-        .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
-        .map((img) => img.image_url)
+      .sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))
+      .map((img) => img.image_url)
     : p.images || [];
 
   const mainImage = images[0] || 'https://images.unsplash.com/photo-1599643477877-530eb83abc8e?auto=format&fit=crop&w=800&q=80';
@@ -97,9 +97,16 @@ const mapSupabaseProduct = (p, costsMap = null) => {
     : undefined;
   const profit = totalInternalCost !== undefined ? sellingPrice - totalInternalCost : undefined;
 
-  const stockQty = Number(p.stock_quantity) !== undefined ? Number(p.stock_quantity) : 25;
-  const stockStatus = p.stock_status || (stockQty <= 0 ? 'Out of Stock' : stockQty <= (p.low_stock_threshold || 5) ? 'Low Stock' : 'In Stock');
-  const inStock = stockStatus !== 'Out of Stock' && stockQty > 0;
+  const parsedStockQty = Number(p.stock_quantity);
+  const stockQty = Number.isFinite(parsedStockQty) ? Math.max(0, parsedStockQty) : 25;
+  const parsedLowThreshold = Number(p.low_stock_threshold);
+  const lowStockThreshold = Number.isFinite(parsedLowThreshold) ? Math.max(0, parsedLowThreshold) : 5;
+  const stockStatus = p.stock_status === 'Out of Stock' || stockQty <= 0
+    ? 'Out of Stock'
+    : stockQty <= lowStockThreshold
+      ? 'Low Stock'
+      : 'In Stock';
+  const inStock = stockQty > 0 && stockStatus !== 'Out of Stock';
 
   return {
     id: p.id,
@@ -118,7 +125,7 @@ const mapSupabaseProduct = (p, costsMap = null) => {
     stockQuantity: stockQty,
     stockStatus,
     inStock,
-    lowStockThreshold: p.low_stock_threshold || 5,
+    lowStockThreshold,
     active: p.is_active !== undefined ? Boolean(p.is_active) : true,
     archived: Boolean(p.is_archived),
     isBestseller: Boolean(p.is_bestseller),
@@ -142,11 +149,11 @@ const mapSupabaseProduct = (p, costsMap = null) => {
     // Private financial fields: ONLY populated for Admin when costsMap is provided
     ...(costsMap
       ? {
-          costPrice,
-          packingCost,
-          totalInternalCost,
-          profit,
-        }
+        costPrice,
+        packingCost,
+        totalInternalCost,
+        profit,
+      }
       : {}),
   };
 };
@@ -383,9 +390,10 @@ export const storeService = {
         return categories[idx];
       }
     }
+    const generatedId = catData.id || catData.slug?.replace(/^\//, '') || `cat-${Date.now()}`;
     const newCat = {
-      id: catData.slug?.replace(/^\//, '') || `cat-${Date.now()}`,
-      slug: catData.slug || `/${catData.id}`,
+      id: generatedId,
+      slug: catData.slug || `/${generatedId}`,
       name: catData.name,
       description: catData.description || '',
       highlights: catData.highlights || [],
@@ -448,8 +456,8 @@ export const storeService = {
     const cleanImages = Array.isArray(pkgData.images) && pkgData.images.length
       ? pkgData.images.filter(Boolean)
       : pkgData.image
-      ? [pkgData.image]
-      : [];
+        ? [pkgData.image]
+        : [];
 
     const pkgId = pkgData.id || `pkg-${Date.now()}`;
     const mainImg = cleanImages[0] || pkgData.image || '';
@@ -675,7 +683,7 @@ export const storeService = {
               stockQuantity: stockQty,
               stockStatus,
               inStock: stockStatus !== 'Out of Stock' && stockQty > 0,
-              lowStockThreshold: p.low_stock_threshold || 5,
+              lowStockThreshold,
               active: Boolean(p.is_active),
               archived: Boolean(p.is_archived),
               isBestseller: Boolean(p.is_bestseller),
@@ -756,90 +764,100 @@ export const storeService = {
   },
 
   async saveProduct(productData) {
-    const cleanImages = Array.isArray(productData.images) && productData.images.length
-      ? productData.images.filter(Boolean)
-      : productData.image
-      ? [productData.image]
-      : ['https://images.unsplash.com/photo-1599643477877-530eb83abc8e?auto=format&fit=crop&w=800&q=80'];
+    const cleanImages =
+      Array.isArray(productData.images) && productData.images.length
+        ? productData.images.filter(Boolean)
+        : productData.image
+          ? [productData.image]
+          : ['https://images.unsplash.com/photo-1599643477877-530eb83abc8e?auto=format&fit=crop&w=800&q=80'];
 
-    const costPriceNum = productData.costPrice !== undefined && productData.costPrice !== '' ? Number(productData.costPrice) : 0;
-    const packingCostNum = productData.packingCost !== undefined && productData.packingCost !== '' ? Number(productData.packingCost) : 0;
-    const sellingPriceNum = Number(productData.price) || 0;
+    const costPriceNum = productData.costPrice !== undefined && productData.costPrice !== '' ? Number(productData.costPrice) || 0 : 0;
+    const packingCostNum = productData.packingCost !== undefined && productData.packingCost !== '' ? Number(productData.packingCost) || 0 : 0;
+    const sellingPriceNum = Number(productData.price ?? productData.sellingPrice) || 0;
     const totalInternalCost = costPriceNum + packingCostNum;
     const profit = sellingPriceNum - totalInternalCost;
 
-    const prodId = productData.id || `prod-${Date.now()}`;
-    const sku = productData.sku || `DB-SKU-${Math.floor(1000 + Math.random() * 9000)}`;
-    const slug = productData.slug || productData.name?.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || prodId;
-    const stockQty = productData.stockQuantity !== undefined ? Number(productData.stockQuantity) : 25;
-    const lowThreshold = productData.lowStockThreshold !== undefined ? Number(productData.lowStockThreshold) : 5;
-    const stockStatus = productData.stockStatus || (stockQty <= 0 ? 'Out of Stock' : stockQty <= lowThreshold ? 'Low Stock' : 'In Stock');
+    const prodId = String(productData.id || productData.product_id || `prod-${Date.now()}`);
+    const sku = String(productData.sku || productData.product_id || `DB-SKU-${Date.now()}`);
+    const slug = productData.slug || productData.name?.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || prodId;
+
+    const parsedStockQty = Number(productData.stockQuantity);
+    const stockQty = Number.isFinite(parsedStockQty) ? Math.max(0, parsedStockQty) : 25;
+    const parsedLowThreshold = Number(productData.lowStockThreshold);
+    const lowThreshold = Number.isFinite(parsedLowThreshold) ? Math.max(0, parsedLowThreshold) : 5;
+    const stockStatus = productData.stockStatus === 'Out of Stock' || stockQty <= 0
+      ? 'Out of Stock'
+      : stockQty <= lowThreshold
+        ? 'Low Stock'
+        : 'In Stock';
+    const now = new Date().toISOString();
 
     if (this.isSupabaseActive()) {
+      const productPayload = {
+        id: prodId,
+        product_id: sku,
+        name: productData.name || 'Untitled Treasure',
+        slug,
+        description: productData.description || '',
+        category_id: productData.category || productData.categoryId || 'anti-tarnish',
+        subcategory_id: productData.subCategory || productData.subcategoryId || null,
+        selling_price: sellingPriceNum,
+        mrp: productData.originalPrice !== undefined && productData.originalPrice !== '' ? Number(productData.originalPrice) || sellingPriceNum : sellingPriceNum,
+        stock_quantity: stockQty,
+        stock_status: stockStatus,
+        low_stock_threshold: lowThreshold,
+        is_active: productData.active !== undefined ? Boolean(productData.active) : true,
+        is_archived: Boolean(productData.archived),
+        is_bestseller: Boolean(productData.isBestseller),
+        is_new_arrival: Boolean(productData.isNewArrival),
+        is_featured: Boolean(productData.isFeatured),
+        is_combo: Boolean(productData.isCombo),
+        combo_items: productData.comboItems || [],
+        combo_description: productData.comboDescription || null,
+        material: productData.material || '',
+        colour: productData.colour || '',
+        size: productData.size || '',
+        waterproof: productData.waterproof || '',
+        anti_tarnish: Boolean(productData.antiTarnish),
+        hypoallergenic: productData.hypoallergenic || '',
+        badge: productData.badge || (productData.isBestseller ? 'Bestseller' : productData.isNewArrival ? 'New' : ''),
+        rating: productData.rating !== undefined && productData.rating !== '' ? Number(productData.rating) || 5 : 5,
+        reviews_count: productData.reviewsCount !== undefined && productData.reviewsCount !== '' ? Number(productData.reviewsCount) || 0 : 0,
+        updated_at: now,
+      };
+
+      const { error: prodError } = await supabase.from('products').upsert(productPayload, { onConflict: 'id' });
+      if (prodError) {
+        console.error('Supabase product save error:', prodError);
+        throw new Error(`Supabase product save failed: ${prodError.message || 'Unknown database error'}`);
+      }
+
       try {
-        // 1. Upsert product record
-        const { error: prodError } = await supabase.from('products').upsert({
-          id: prodId,
-          product_id: sku,
-          name: productData.name || 'Untitled Treasure',
-          slug,
-          description: productData.description || '',
-          category_id: productData.category || 'anti-tarnish',
-          subcategory_id: productData.subCategory || null,
-          selling_price: sellingPriceNum,
-          mrp: productData.originalPrice ? Number(productData.originalPrice) : sellingPriceNum,
-          stock_quantity: stockQty,
-          stock_status: stockStatus,
-          low_stock_threshold: lowThreshold,
-          is_active: productData.active !== undefined ? Boolean(productData.active) : true,
-          is_archived: Boolean(productData.archived),
-          is_bestseller: Boolean(productData.isBestseller),
-          is_new_arrival: Boolean(productData.isNewArrival),
-          is_featured: Boolean(productData.isFeatured),
-          is_combo: Boolean(productData.isCombo),
-          combo_items: productData.comboItems || [],
-          combo_description: productData.comboDescription || null,
-          material: productData.material || '',
-          colour: productData.colour || '',
-          size: productData.size || '',
-          waterproof: productData.waterproof || '',
-          anti_tarnish: Boolean(productData.antiTarnish),
-          hypoallergenic: productData.hypoallergenic || '',
-          badge: productData.badge || '',
-          updated_at: new Date().toISOString(),
-        });
-
-        if (prodError) console.error('Supabase product save error:', prodError);
-
-        // 2. Upsert private financial cost data
         const { error: costError } = await supabase.from('product_costs').upsert({
           product_id: prodId,
           cost_price: costPriceNum,
           packing_cost: packingCostNum,
-          updated_at: new Date().toISOString(),
-        });
-
-        if (costError) console.error('Supabase cost save error:', costError);
-
-        // 3. Upsert images
-        if (cleanImages.length) {
-          await supabase.from('product_images').delete().eq('product_id', prodId);
-          const imagesToInsert = cleanImages.map((url, idx) => ({
-            product_id: prodId,
-            image_url: url,
-            sort_order: idx + 1,
-            is_primary: idx === 0,
-          }));
-          await supabase.from('product_images').insert(imagesToInsert);
-        }
+          updated_at: now,
+        }, { onConflict: 'product_id' });
+        if (costError) console.warn('Private product cost save skipped:', costError.message);
       } catch (err) {
-        console.warn('Supabase saveProduct error:', err);
+        console.warn('Private product cost save skipped:', err);
+      }
+
+      if (cleanImages.length) {
+        try {
+          const { error: deleteImageError } = await supabase.from('product_images').delete().eq('product_id', prodId);
+          if (deleteImageError) console.warn('Old product images could not be removed:', deleteImageError.message);
+          const imagesToInsert = cleanImages.map((url, idx) => ({ product_id: prodId, image_url: url, sort_order: idx + 1, is_primary: idx === 0 }));
+          const { error: imageError } = await supabase.from('product_images').insert(imagesToInsert);
+          if (imageError) console.warn('Product image save skipped:', imageError.message);
+        } catch (err) {
+          console.warn('Product image operation skipped:', err);
+        }
       }
     }
 
-    // Update local storage fallback
     const products = getStorageItem(STORAGE_KEYS.PRODUCTS, []);
-    const now = new Date().toISOString();
     const updatedProduct = {
       id: prodId,
       sku,
@@ -848,22 +866,25 @@ export const storeService = {
       images: cleanImages,
       image: cleanImages[0],
       price: sellingPriceNum,
-      salePrice: productData.originalPrice ? sellingPriceNum : null,
-      originalPrice: productData.originalPrice ? Number(productData.originalPrice) : sellingPriceNum,
+      salePrice: productData.originalPrice !== undefined && productData.originalPrice !== '' ? sellingPriceNum : null,
+      originalPrice: productData.originalPrice !== undefined && productData.originalPrice !== '' ? Number(productData.originalPrice) || sellingPriceNum : sellingPriceNum,
       costPrice: costPriceNum,
       packingCost: packingCostNum,
       totalInternalCost,
       profit,
-      category: productData.category || 'anti-tarnish',
+      category: productData.category || productData.categoryId || 'anti-tarnish',
       categoryName: productData.categoryName || '✨ Anti-Tarnish Jewellery',
-      subCategory: productData.subCategory || null,
+      subCategory: productData.subCategory || productData.subcategoryId || null,
       description: productData.description || '',
       material: productData.material || '',
       colour: productData.colour || '',
       size: productData.size || '',
+      waterproof: productData.waterproof || '',
+      antiTarnish: Boolean(productData.antiTarnish),
+      hypoallergenic: productData.hypoallergenic || '',
       stockQuantity: stockQty,
       lowStockThreshold: lowThreshold,
-      inStock: stockStatus !== 'Out of Stock' && stockQty > 0,
+      inStock: stockQty > 0 && stockStatus !== 'Out of Stock',
       stockStatus,
       tags: productData.tags || [],
       active: productData.active !== undefined ? Boolean(productData.active) : true,
@@ -874,54 +895,50 @@ export const storeService = {
       isCombo: Boolean(productData.isCombo),
       comboItems: productData.comboItems || [],
       comboDescription: productData.comboDescription || null,
-      antiTarnish: Boolean(productData.antiTarnish),
       badge: productData.badge || (productData.isBestseller ? 'Bestseller' : productData.isNewArrival ? 'New' : ''),
-      rating: productData.rating || 5.0,
-      reviewsCount: productData.reviewsCount || 0,
+      rating: Number(productData.rating) || 5,
+      reviewsCount: Number(productData.reviewsCount) || 0,
       updatedDate: now,
     };
-
     const idx = products.findIndex((p) => p.id === prodId);
-    if (idx !== -1) {
-      products[idx] = { ...products[idx], ...updatedProduct };
-    } else {
-      updatedProduct.createdDate = now;
-      products.unshift(updatedProduct);
-    }
+    if (idx !== -1) products[idx] = { ...products[idx], ...updatedProduct };
+    else { updatedProduct.createdDate = now; products.unshift(updatedProduct); }
     setStorageItem(STORAGE_KEYS.PRODUCTS, products);
     return updatedProduct;
   },
 
-  async updateProductStock(productId, newStockQuantity, inStock = null) {
-    const qty = newStockQuantity !== undefined && newStockQuantity !== null ? Math.max(0, Number(newStockQuantity) || 0) : null;
-    let status = inStock === false || (qty !== null && qty <= 0) ? 'Out of Stock' : inStock === true ? 'In Stock' : null;
+  async updateProductStock(productId, qty = null, status = null) {
+    const products = getStorageItem(STORAGE_KEYS.PRODUCTS, []);
+    const existing = products.find((p) => p.id === productId);
+    const currentQty = Number(existing?.stockQuantity);
+    const requestedQty = qty === null || qty === undefined ? currentQty : Number(qty);
+    const nextQty = Number.isFinite(requestedQty) ? Math.max(0, requestedQty) : 0;
+    const thresholdValue = Number(existing?.lowStockThreshold);
+    const lowThreshold = Number.isFinite(thresholdValue) ? Math.max(0, thresholdValue) : 5;
+    const nextStatus = status === 'Out of Stock' || status === false || nextQty <= 0
+      ? 'Out of Stock'
+      : nextQty <= lowThreshold
+        ? 'Low Stock'
+        : 'In Stock';
 
     if (this.isSupabaseActive()) {
-      try {
-        const updatePayload = { updated_at: new Date().toISOString() };
-        if (qty !== null) updatePayload.stock_quantity = qty;
-        if (status !== null) {
-          updatePayload.stock_status = status;
-        } else if (qty !== null) {
-          updatePayload.stock_status = qty <= 0 ? 'Out of Stock' : 'In Stock';
-        }
-        await supabase.from('products').update(updatePayload).eq('id', productId);
-      } catch (err) {
-        console.warn('Supabase updateProductStock error:', err);
+      const { error } = await supabase.from('products').update({
+        stock_quantity: nextQty,
+        stock_status: nextStatus,
+        updated_at: new Date().toISOString(),
+      }).eq('id', productId);
+      if (error) {
+        console.error('Supabase updateProductStock error:', error);
+        throw new Error(`Supabase stock update failed: ${error.message}`);
       }
     }
 
-    const products = getStorageItem(STORAGE_KEYS.PRODUCTS, []);
     const idx = products.findIndex((p) => p.id === productId);
     if (idx !== -1) {
-      if (qty !== null) products[idx].stockQuantity = qty;
-      if (status !== null) {
-        products[idx].stockStatus = status;
-        products[idx].inStock = status !== 'Out of Stock';
-      } else if (qty !== null) {
-        products[idx].stockStatus = qty <= 0 ? 'Out of Stock' : 'In Stock';
-        products[idx].inStock = qty > 0;
-      }
+      products[idx].stockQuantity = nextQty;
+      products[idx].lowStockThreshold = lowThreshold;
+      products[idx].stockStatus = nextStatus;
+      products[idx].inStock = nextQty > 0 && nextStatus !== 'Out of Stock';
       products[idx].updatedDate = new Date().toISOString();
       setStorageItem(STORAGE_KEYS.PRODUCTS, products);
       return products[idx];
@@ -980,14 +997,17 @@ export const storeService = {
   async deleteProduct(productId) {
     if (this.isSupabaseActive()) {
       try {
-        await supabase.from('products').delete().eq('id', productId);
+        const { error: imageError } = await supabase.from('product_images').delete().eq('product_id', productId);
+        if (imageError) console.warn('Product image cleanup warning:', imageError.message);
+        const { error } = await supabase.from('products').delete().eq('id', productId);
+        if (error) throw new Error(`Supabase product delete failed: ${error.message}`);
       } catch (err) {
-        console.warn('Supabase deleteProduct error:', err);
+        console.error('Supabase deleteProduct failed:', err);
+        throw err;
       }
     }
     const products = getStorageItem(STORAGE_KEYS.PRODUCTS, []);
-    const filtered = products.filter((p) => p.id !== productId);
-    setStorageItem(STORAGE_KEYS.PRODUCTS, filtered);
+    setStorageItem(STORAGE_KEYS.PRODUCTS, products.filter((p) => p.id !== productId));
     return true;
   },
 
@@ -1115,9 +1135,8 @@ export const storeService = {
         }
 
         // Adopt authoritative orderNumber returned from database
-        if (data?.orderNumber) {
-          orderNumber = data.orderNumber;
-        }
+        const returnedOrderNumber = typeof data === 'string' ? data : data?.orderNumber || data?.order_id || data?.orderId || null;
+        if (returnedOrderNumber) orderNumber = returnedOrderNumber;
       } catch (err) {
         console.error('Atomic order placement error:', err);
         throw err;
@@ -1176,9 +1195,17 @@ export const storeService = {
       const prod = products.find((p) => p.id === item.productId);
       if (prod && prod.stockQuantity !== undefined) {
         prod.stockQuantity = Math.max(0, prod.stockQuantity - item.quantity);
-        if (prod.stockQuantity === 0) {
+        const qty = Number(prod.stockQuantity) || 0;
+        const threshold = Number(prod.lowStockThreshold) || 5;
+        if (qty <= 0) {
           prod.stockStatus = 'Out of Stock';
           prod.inStock = false;
+        } else if (qty <= threshold) {
+          prod.stockStatus = 'Low Stock';
+          prod.inStock = true;
+        } else {
+          prod.stockStatus = 'In Stock';
+          prod.inStock = true;
         }
       }
     });
@@ -1223,10 +1250,10 @@ export const storeService = {
               lineTotal: Number(item.item_total) || 0,
               packaging: item.selected_packaging_id
                 ? {
-                    id: item.selected_packaging_id,
-                    name: item.selected_packaging_name,
-                    price: Number(item.selected_packaging_price) || 0,
-                  }
+                  id: item.selected_packaging_id,
+                  name: item.selected_packaging_name,
+                  price: Number(item.selected_packaging_price) || 0,
+                }
                 : null,
               packagingPrice: Number(item.selected_packaging_price) || 0,
               color: item.selected_card_color,
@@ -1288,10 +1315,10 @@ export const storeService = {
               lineTotal: Number(item.item_total) || 0,
               packaging: item.selected_packaging_id
                 ? {
-                    id: item.selected_packaging_id,
-                    name: item.selected_packaging_name,
-                    price: Number(item.selected_packaging_price) || 0,
-                  }
+                  id: item.selected_packaging_id,
+                  name: item.selected_packaging_name,
+                  price: Number(item.selected_packaging_price) || 0,
+                }
                 : null,
               packagingPrice: Number(item.selected_packaging_price) || 0,
               color: item.selected_card_color,

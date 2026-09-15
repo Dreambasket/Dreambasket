@@ -21,6 +21,7 @@ const STORAGE_KEYS = {
   PACKAGING: 'dreambasket_db_packaging',
   CARD_COLORS: 'dreambasket_db_card_colors',
   CARD_THEMES: 'dreambasket_db_card_themes',
+  PURCHASE_HISTORY: 'dreambasket_db_purchase_history',
 };
 
 const DEFAULT_STORE_SETTINGS = {
@@ -1227,6 +1228,7 @@ export const storeService = {
 
         if (!error && data) {
           return data.map((o) => ({
+            id: o.id,
             orderNumber: o.order_id,
             createdAt: o.created_at,
             customer: {
@@ -1387,6 +1389,31 @@ export const storeService = {
     return null;
   },
 
+  async deleteOrder(orderId) {
+    if (!orderId) return false;
+    const strId = String(orderId).trim();
+
+    if (this.isSupabaseActive()) {
+      try {
+        const { data: rpcRes, error: deleteErr } = await supabase.rpc('delete_admin_order', {
+          p_order_id: strId,
+        });
+
+        if (deleteErr) {
+          console.error('Supabase delete_admin_order RPC error:', deleteErr);
+          throw new Error(`Failed to delete order from database: ${deleteErr.message}`);
+        }
+
+        return true;
+      } catch (err) {
+        console.error('deleteOrder error in Supabase:', err);
+        throw err;
+      }
+    }
+
+    throw new Error('Supabase is not configured. Order deletion requires an active Supabase database connection.');
+  },
+
   // -------------------------------------------------------------
   // 7. CUSTOMERS DIRECTORY
   // -------------------------------------------------------------
@@ -1497,6 +1524,212 @@ export const storeService = {
   },
 
   // -------------------------------------------------------------
+  // 8B. PRODUCT PURCHASE & PROFIT (Admin Only Internal Financials 🔒)
+  // Master product references via product_id (TEXT).
+  // Permanently stored in Supabase PostgreSQL public.product_purchase_history.
+  // Never returned to customer website.
+  // -------------------------------------------------------------
+  async getProductPurchaseHistory() {
+    if (this.isSupabaseActive()) {
+      const { data, error } = await supabase
+        .from('product_purchase_history')
+        .select('*')
+        .order('purchase_date', { ascending: false })
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Supabase getProductPurchaseHistory error:', error);
+        throw new Error(`Failed to load purchase history from Supabase: ${error.message}`);
+      }
+
+      return (data || []).map((item) => ({
+        id: item.id,
+        productId: String(item.product_id),
+        supplierName: item.supplier_name || 'Wholesale Supplier',
+        buyingPrice: Number(item.buying_price) || 0,
+        quantity: Number(item.quantity) || 1,
+        packagingCost: Number(item.packaging_cost) || 0,
+        sellingPriceSnapshot: item.selling_price_snapshot !== null && item.selling_price_snapshot !== undefined ? Number(item.selling_price_snapshot) : 0,
+        purchaseDate: item.purchase_date,
+        notes: item.notes || '',
+        createdAt: item.created_at,
+        updatedAt: item.updated_at,
+      }));
+    }
+    return [];
+  },
+
+  async getProductPurchases(productId) {
+    if (!productId) return [];
+    if (this.isSupabaseActive()) {
+      const { data, error } = await supabase
+        .from('product_purchase_history')
+        .select('*')
+        .eq('product_id', String(productId))
+        .order('purchase_date', { ascending: false })
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('Supabase getProductPurchases error:', error);
+        throw new Error(`Failed to load product purchases: ${error.message}`);
+      }
+
+      return (data || []).map((item) => ({
+        id: item.id,
+        productId: String(item.product_id),
+        supplierName: item.supplier_name || 'Wholesale Supplier',
+        buyingPrice: Number(item.buying_price) || 0,
+        quantity: Number(item.quantity) || 1,
+        packagingCost: Number(item.packaging_cost) || 0,
+        sellingPriceSnapshot: item.selling_price_snapshot !== null && item.selling_price_snapshot !== undefined ? Number(item.selling_price_snapshot) : 0,
+        purchaseDate: item.purchase_date,
+        notes: item.notes || '',
+        createdAt: item.created_at,
+        updatedAt: item.updated_at,
+      }));
+    }
+    return [];
+  },
+
+  async saveProductPurchase(data) {
+    if (!data.productId) {
+      throw new Error('Product selection is required for purchase history.');
+    }
+
+    const buyingPrice = Number(data.buyingPrice) || 0;
+    const quantity = Math.max(1, parseInt(data.quantity, 10) || 1);
+    const packagingCost = Number(data.packagingCost) || 0;
+    const sellingPriceSnapshot = Number(data.sellingPriceSnapshot ?? data.sellingPrice ?? data.price) || 0;
+    const purchaseDate = data.purchaseDate || new Date().toISOString().split('T')[0];
+    const notes = data.notes || '';
+    const supplierName = (data.supplierName || data.supplier || 'Wholesale Supplier').trim();
+
+    if (this.isSupabaseActive()) {
+      const rowToInsert = {
+        product_id: String(data.productId),
+        supplier_name: supplierName,
+        buying_price: buyingPrice,
+        quantity,
+        packaging_cost: packagingCost,
+        selling_price_snapshot: sellingPriceSnapshot,
+        purchase_date: purchaseDate,
+        notes,
+      };
+      if (data.id) rowToInsert.id = data.id;
+
+      const { data: inserted, error } = await supabase
+        .from('product_purchase_history')
+        .insert([rowToInsert])
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Supabase saveProductPurchase error:', error);
+        throw new Error(`Failed to save purchase to Supabase: ${error.message}`);
+      }
+
+      return {
+        id: inserted.id,
+        productId: String(inserted.product_id),
+        supplierName: inserted.supplier_name,
+        buyingPrice: Number(inserted.buying_price),
+        quantity: Number(inserted.quantity),
+        packagingCost: Number(inserted.packaging_cost),
+        sellingPriceSnapshot: Number(inserted.selling_price_snapshot),
+        purchaseDate: inserted.purchase_date,
+        notes: inserted.notes || '',
+        createdAt: inserted.created_at,
+        updatedAt: inserted.updated_at,
+      };
+    }
+    throw new Error('Supabase is not configured. Purchase history requires an active Supabase connection.');
+  },
+
+  async updateProductPurchase(id, data) {
+    if (!id) throw new Error('Purchase ID is required to update.');
+
+    const updatePayload = {
+      updated_at: new Date().toISOString(),
+    };
+    if (data.productId !== undefined) updatePayload.product_id = String(data.productId);
+    if (data.supplierName !== undefined || data.supplier !== undefined) {
+      updatePayload.supplier_name = (data.supplierName || data.supplier || '').trim();
+    }
+    if (data.buyingPrice !== undefined) updatePayload.buying_price = Number(data.buyingPrice) || 0;
+    if (data.quantity !== undefined) updatePayload.quantity = Math.max(1, parseInt(data.quantity, 10) || 1);
+    if (data.packagingCost !== undefined) updatePayload.packaging_cost = Number(data.packagingCost) || 0;
+    if (data.sellingPriceSnapshot !== undefined) updatePayload.selling_price_snapshot = Number(data.sellingPriceSnapshot) || 0;
+    if (data.purchaseDate !== undefined) updatePayload.purchase_date = data.purchaseDate;
+    if (data.notes !== undefined) updatePayload.notes = data.notes;
+
+    if (this.isSupabaseActive()) {
+      const { data: updated, error } = await supabase
+        .from('product_purchase_history')
+        .update(updatePayload)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Supabase updateProductPurchase error:', error);
+        throw new Error(`Failed to update purchase in Supabase: ${error.message}`);
+      }
+
+      return {
+        id: updated.id,
+        productId: String(updated.product_id),
+        supplierName: updated.supplier_name,
+        buyingPrice: Number(updated.buying_price),
+        quantity: Number(updated.quantity),
+        packagingCost: Number(updated.packaging_cost),
+        sellingPriceSnapshot: Number(updated.selling_price_snapshot),
+        purchaseDate: updated.purchase_date,
+        notes: updated.notes || '',
+        createdAt: updated.created_at,
+        updatedAt: updated.updated_at,
+      };
+    }
+    throw new Error('Supabase is not configured. Purchase history requires an active Supabase connection.');
+  },
+
+  async deleteProductPurchase(id) {
+    if (!id) throw new Error('Purchase ID is required to delete.');
+
+    if (this.isSupabaseActive()) {
+      const { error } = await supabase
+        .from('product_purchase_history')
+        .delete()
+        .eq('id', id);
+
+      if (error) {
+        console.error('Supabase deleteProductPurchase error:', error);
+        throw new Error(`Failed to delete purchase from Supabase: ${error.message}`);
+      }
+      return true;
+    }
+    throw new Error('Supabase is not configured. Purchase history requires an active Supabase connection.');
+  },
+
+  async getPurchaseSuppliers() {
+    if (this.isSupabaseActive()) {
+      const { data, error } = await supabase
+        .from('product_purchase_history')
+        .select('supplier_name');
+
+      if (!error && data) {
+        const suppliers = new Set();
+        data.forEach((item) => {
+          if (item.supplier_name && item.supplier_name.trim()) {
+            suppliers.add(item.supplier_name.trim());
+          }
+        });
+        return Array.from(suppliers).sort((a, b) => a.localeCompare(b));
+      }
+    }
+    return [];
+  },
+
+  // -------------------------------------------------------------
   // 9. IMAGE STORAGE UPLOAD
   // -------------------------------------------------------------
   async uploadImage(file, bucket = 'product-images') {
@@ -1505,7 +1738,16 @@ export const storeService = {
         const result = await uploadStorageFile(bucket, file);
         return result.publicUrl;
       } catch (err) {
-        console.error('Upload to Supabase failed:', err);
+        console.warn(`Upload to ${bucket} failed:`, err);
+        if (bucket !== 'product-images') {
+          try {
+            console.log('Attempting fallback upload to product-images bucket...');
+            const fallbackResult = await uploadStorageFile('product-images', file);
+            return fallbackResult.publicUrl;
+          } catch (retryErr) {
+            console.warn('Fallback bucket upload also failed:', retryErr);
+          }
+        }
         throw err;
       }
     }

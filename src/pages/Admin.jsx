@@ -34,6 +34,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { storeService } from '../services/storeService';
+import { supabase } from '../services/supabase';
 import { useShop } from '../context/ShopContext';
 import { Button } from '../components/Button';
 
@@ -61,11 +62,17 @@ export const Admin = () => {
   const [settings, setSettings] = useState(null);
   const [customers, setCustomers] = useState([]);
   const [salesAnalytics, setSalesAnalytics] = useState(null);
+  const [purchases, setPurchases] = useState([]);
+  const [purchaseSuppliers, setPurchaseSuppliers] = useState([]);
   const [loading, setLoading] = useState(true);
 
   // Modals & Selected Entities
   const [selectedOrder, setSelectedOrder] = useState(null);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
+
+  // Order Deletion Confirmation Modal State
+  const [orderToDelete, setOrderToDelete] = useState(null);
+  const [isDeletingOrder, setIsDeletingOrder] = useState(false);
 
   // Product Add / Edit Modal
   const [isProductModalOpen, setIsProductModalOpen] = useState(false);
@@ -98,7 +105,7 @@ export const Admin = () => {
   });
   const [newImageUrl, setNewImageUrl] = useState('');
 
-  // Category Add / Edit Modal
+  // Category Add / Edit Modal State & File Upload
   const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState(null);
   const [categoryFormData, setCategoryFormData] = useState({
@@ -108,6 +115,33 @@ export const Admin = () => {
     image: '',
     subcategoriesStr: '',
   });
+  const [categoryImageFile, setCategoryImageFile] = useState(null);
+  const [categoryImagePreview, setCategoryImagePreview] = useState('');
+  const [categoryImageUploading, setCategoryImageUploading] = useState(false);
+  const [categoryUploadError, setCategoryUploadError] = useState('');
+
+  // Product Purchase & Profit (Admin Only 🔒) State & Modals
+  const [isPurchaseModalOpen, setIsPurchaseModalOpen] = useState(false);
+  const [editingPurchase, setEditingPurchase] = useState(null);
+  const [purchaseFormData, setPurchaseFormData] = useState({
+    productId: '',
+    supplierName: '',
+    buyingPrice: '',
+    quantity: 1,
+    packagingCost: '',
+    sellingPriceSnapshot: 0,
+    purchaseDate: new Date().toISOString().split('T')[0],
+    notes: '',
+  });
+  const [purchaseProductSearch, setPurchaseProductSearch] = useState('');
+  const [purchaseSearch, setPurchaseSearch] = useState('');
+  const [purchaseSupplierFilter, setPurchaseSupplierFilter] = useState('ALL');
+  const [purchaseCategoryFilter, setPurchaseCategoryFilter] = useState('ALL');
+  const [purchaseDateFilter, setPurchaseDateFilter] = useState('');
+
+  // Product Purchase History Drill-down Modal State
+  const [selectedHistoryProduct, setSelectedHistoryProduct] = useState(null);
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
 
   // Packaging Add / Edit Modal
   const [isPackagingModalOpen, setIsPackagingModalOpen] = useState(false);
@@ -146,7 +180,7 @@ export const Admin = () => {
   const loadAdminData = async () => {
     setLoading(true);
     try {
-      const [allOrders, allProds, allCats, storeSettings, pkgOptions, colors, themes, custs, sales] =
+      const [allOrders, allProds, allCats, storeSettings, pkgOptions, colors, themes, custs, sales, allPurchases, suppliersList] =
         await Promise.all([
           storeService.getOrders(),
           storeService.getAllProductsAdmin(),
@@ -157,6 +191,14 @@ export const Admin = () => {
           storeService.getCardThemes(),
           storeService.getCustomers(),
           storeService.getSalesAnalytics(),
+          storeService.getProductPurchaseHistory().catch((err) => {
+            console.warn('Could not load product purchase history:', err);
+            return [];
+          }),
+          storeService.getPurchaseSuppliers().catch((err) => {
+            console.warn('Could not load purchase suppliers:', err);
+            return [];
+          }),
         ]);
 
       setOrders(allOrders);
@@ -169,6 +211,8 @@ export const Admin = () => {
       setCardThemes(themes);
       setCustomers(custs);
       setSalesAnalytics(sales);
+      setPurchases(allPurchases || []);
+      setPurchaseSuppliers(suppliersList || []);
 
       // Initialize inline stock state
       const stockMap = {};
@@ -578,6 +622,8 @@ export const Admin = () => {
   // CATEGORY MANAGEMENT HANDLERS (Part 13)
   // -------------------------------------------------------------
   const handleOpenCategoryModal = (cat = null) => {
+    setCategoryImageFile(null);
+    setCategoryUploadError('');
     if (cat) {
       setEditingCategory(cat);
       setCategoryFormData({
@@ -587,22 +633,65 @@ export const Admin = () => {
         image: cat.image || '',
         subcategoriesStr: cat.subcategories ? cat.subcategories.map((s) => s.name).join(', ') : '',
       });
+      setCategoryImagePreview(cat.image || '');
     } else {
       setEditingCategory(null);
       setCategoryFormData({
         name: '',
         slug: '',
         description: '',
-        image: 'https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&w=700&q=80',
+        image: '',
         subcategoriesStr: '',
       });
+      setCategoryImagePreview('');
     }
     setIsCategoryModalOpen(true);
+  };
+
+  const handleCategoryImageSelect = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Supported formats: JPG, JPEG, PNG, WEBP
+    const validExtensions = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    if (!validExtensions.includes(file.type.toLowerCase())) {
+      setCategoryUploadError('Please select a valid image file (JPG, PNG, or WEBP).');
+      return;
+    }
+
+    setCategoryUploadError('');
+    setCategoryImageFile(file);
+
+    try {
+      const previewUrl = URL.createObjectURL(file);
+      setCategoryImagePreview(previewUrl);
+    } catch {
+      const reader = new FileReader();
+      reader.onloadend = () => setCategoryImagePreview(reader.result);
+      reader.readAsDataURL(file);
+    }
   };
 
   const handleSaveCategory = async (e) => {
     e.preventDefault();
     if (!categoryFormData.name) return;
+
+    setCategoryImageUploading(true);
+    setCategoryUploadError('');
+
+    let finalImageUrl = categoryFormData.image || '';
+
+    // If a new image file was selected from device, upload it first
+    if (categoryImageFile) {
+      try {
+        finalImageUrl = await uploadFileSmart(categoryImageFile, 'category-images');
+      } catch (err) {
+        console.error('Category image upload failed:', err);
+        setCategoryUploadError(`Image upload failed: ${err.message || 'Storage error'}. You can still save with a URL.`);
+        setCategoryImageUploading(false);
+        return;
+      }
+    }
 
     const subcats = categoryFormData.subcategoriesStr
       ? categoryFormData.subcategoriesStr
@@ -621,7 +710,7 @@ export const Admin = () => {
       name: categoryFormData.name,
       slug: categoryFormData.slug || `/${categoryFormData.name.toLowerCase().replace(/\s+/g, '-')}`,
       description: categoryFormData.description,
-      image: categoryFormData.image,
+      image: finalImageUrl,
       subcategories: subcats,
     };
 
@@ -631,7 +720,9 @@ export const Admin = () => {
       await refreshData();
       setIsCategoryModalOpen(false);
     } catch (err) {
-      alert(`Error saving category: ${err.message}`);
+      setCategoryUploadError(`Error saving category: ${err.message}`);
+    } finally {
+      setCategoryImageUploading(false);
     }
   };
 
@@ -642,6 +733,243 @@ export const Admin = () => {
       await refreshData();
     }
   };
+
+  // -------------------------------------------------------------
+  // ORDER DELETION HANDLERS (Safe Unpaid / Incomplete Delete)
+  // -------------------------------------------------------------
+  const isOrderDeletable = (order) => {
+    if (!order) return false;
+    const pStatus = (order.paymentStatus || '').toUpperCase();
+    const oStatus = (order.orderStatus || '').toLowerCase();
+
+    // Completed & confirmed orders with verified payment are strictly protected
+    if (['delivered', 'shipped', 'packed', 'confirmed'].includes(oStatus) && ['PAYMENT_VERIFIED', 'PAID'].includes(pStatus)) {
+      return false;
+    }
+
+    // Allow deleting Pending, Unpaid, Failed, Cancelled, Returned, or New unpaid orders
+    return (
+      pStatus === 'PENDING' ||
+      pStatus === 'FAILED' ||
+      pStatus === 'UNPAID' ||
+      oStatus === 'cancelled' ||
+      oStatus === 'returned' ||
+      (oStatus === 'new' && pStatus !== 'PAYMENT_VERIFIED' && pStatus !== 'PAID')
+    );
+  };
+
+  const handleRequestDeleteOrder = (order) => {
+    setOrderToDelete(order);
+  };
+
+  const handleConfirmDeleteOrder = async () => {
+    if (!orderToDelete) return;
+    const deletedOrderNum = orderToDelete.orderNumber || orderToDelete.id;
+    setIsDeletingOrder(true);
+    try {
+      await storeService.deleteOrder(orderToDelete.orderNumber || orderToDelete.id);
+      if (selectedOrder && (selectedOrder.orderNumber === orderToDelete.orderNumber || selectedOrder.id === orderToDelete.id)) {
+        setSelectedOrder(null);
+      }
+      setOrderToDelete(null);
+      await loadAdminData();
+      await refreshData();
+      alert(`Order ${deletedOrderNum} deleted successfully.`);
+    } catch (err) {
+      alert(`Failed to delete order: ${err.message || 'Unknown database error'}`);
+    } finally {
+      setIsDeletingOrder(false);
+    }
+  };
+
+  // -------------------------------------------------------------
+  // PRODUCT PURCHASE & PROFIT HANDLERS (Admin Only 🔒)
+  // -------------------------------------------------------------
+  const availableSuppliers = useMemo(() => {
+    const set = new Set();
+    purchases.forEach((p) => {
+      if (p.supplierName && p.supplierName.trim()) {
+        set.add(p.supplierName.trim());
+      }
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [purchases]);
+
+  const productsMap = useMemo(() => {
+    const map = {};
+    products.forEach((p) => {
+      map[p.id] = p;
+    });
+    return map;
+  }, [products]);
+
+  const filteredPurchases = useMemo(() => {
+    return purchases.filter((p) => {
+      const prod = productsMap[p.productId] || {};
+      const prodName = (prod.name || '').toLowerCase();
+      const supplier = (p.supplierName || '').toLowerCase();
+      const term = purchaseSearch.trim().toLowerCase();
+
+      // Search matching Product name or Supplier name
+      if (term && !prodName.includes(term) && !supplier.includes(term)) {
+        return false;
+      }
+
+      // Supplier chip filter
+      if (purchaseSupplierFilter !== 'ALL' && p.supplierName !== purchaseSupplierFilter) {
+        return false;
+      }
+
+      // Category dropdown filter
+      if (purchaseCategoryFilter !== 'ALL') {
+        const prodCat = prod.category || prod.categoryId;
+        if (prodCat !== purchaseCategoryFilter) return false;
+      }
+
+      // Optional Date filter
+      if (purchaseDateFilter && p.purchaseDate !== purchaseDateFilter) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [purchases, productsMap, purchaseSearch, purchaseSupplierFilter, purchaseCategoryFilter, purchaseDateFilter]);
+
+  const purchaseSummaries = useMemo(() => {
+    let totalRecords = filteredPurchases.length;
+    let totalItems = 0;
+    let totalInvested = 0;
+    let estimatedRevenue = 0;
+    let projectedGrossProfit = 0;
+
+    filteredPurchases.forEach((p) => {
+      const qty = Number(p.quantity) || 1;
+      const buyPrice = Number(p.buyingPrice) || 0;
+      const packCost = Number(p.packagingCost) || 0;
+      const sellPrice = p.sellingPriceSnapshot !== undefined && p.sellingPriceSnapshot !== null && Number(p.sellingPriceSnapshot) > 0
+        ? Number(p.sellingPriceSnapshot)
+        : Number(productsMap[p.productId]?.price) || 0;
+
+      const batchInvestment = buyPrice * qty;
+      const batchRevenue = sellPrice * qty;
+      const profitPerItem = sellPrice - buyPrice - packCost;
+      const batchProfit = profitPerItem * qty;
+
+      totalItems += qty;
+      totalInvested += batchInvestment;
+      estimatedRevenue += batchRevenue;
+      projectedGrossProfit += batchProfit;
+    });
+
+    const overallMarginPercent = estimatedRevenue > 0
+      ? Number(((projectedGrossProfit / estimatedRevenue) * 100).toFixed(1))
+      : 0;
+
+    return {
+      totalRecords,
+      totalItems,
+      totalInvested: Math.round(totalInvested),
+      totalInvestment: Math.round(totalInvested), // backward-compatible alias
+      estimatedRevenue: Math.round(estimatedRevenue),
+      projectedGrossProfit: Math.round(projectedGrossProfit),
+      potentialTotalProfit: Math.round(projectedGrossProfit), // backward-compatible alias
+      overallMarginPercent,
+    };
+  }, [filteredPurchases, productsMap]);
+
+  const handleOpenPurchaseModal = (purchase = null, defaultProduct = null) => {
+    setPurchaseProductSearch('');
+    if (purchase) {
+      setEditingPurchase(purchase);
+      const prod = productsMap[purchase.productId] || {};
+      setPurchaseFormData({
+        productId: purchase.productId,
+        supplierName: purchase.supplierName || '',
+        buyingPrice: purchase.buyingPrice || '',
+        quantity: purchase.quantity || 1,
+        packagingCost: purchase.packagingCost || '',
+        sellingPriceSnapshot: purchase.sellingPriceSnapshot || prod.price || 0,
+        purchaseDate: purchase.purchaseDate || new Date().toISOString().split('T')[0],
+        notes: purchase.notes || '',
+      });
+    } else {
+      setEditingPurchase(null);
+      const targetProd = defaultProduct || (products.length > 0 ? products[0] : null);
+      setPurchaseFormData({
+        productId: targetProd ? targetProd.id : '',
+        supplierName: '',
+        buyingPrice: '',
+        quantity: 1,
+        packagingCost: '',
+        sellingPriceSnapshot: targetProd ? (targetProd.price || targetProd.sellingPrice || 0) : 0,
+        purchaseDate: new Date().toISOString().split('T')[0],
+        notes: '',
+      });
+    }
+    setIsPurchaseModalOpen(true);
+  };
+
+  const handleSelectProductForPurchase = (prod) => {
+    if (!prod) return;
+    setPurchaseFormData((prev) => ({
+      ...prev,
+      productId: prod.id,
+      sellingPriceSnapshot: prod.price || prod.sellingPrice || 0,
+    }));
+  };
+
+  const handleSavePurchase = async (e) => {
+    e.preventDefault();
+    if (!purchaseFormData.productId) {
+      alert('Please select an existing product.');
+      return;
+    }
+    if (!purchaseFormData.supplierName.trim()) {
+      alert('Please enter a supplier name.');
+      return;
+    }
+
+    try {
+      const payload = {
+        productId: purchaseFormData.productId,
+        supplierName: purchaseFormData.supplierName.trim(),
+        buyingPrice: Number(purchaseFormData.buyingPrice) || 0,
+        quantity: Math.max(1, parseInt(purchaseFormData.quantity, 10) || 1),
+        packagingCost: Number(purchaseFormData.packagingCost) || 0,
+        sellingPriceSnapshot: Number(purchaseFormData.sellingPriceSnapshot) || 0,
+        purchaseDate: purchaseFormData.purchaseDate || new Date().toISOString().split('T')[0],
+        notes: purchaseFormData.notes || '',
+      };
+
+      if (editingPurchase) {
+        await storeService.updateProductPurchase(editingPurchase.id, payload);
+      } else {
+        await storeService.saveProductPurchase(payload);
+      }
+
+      await loadAdminData();
+      setIsPurchaseModalOpen(false);
+    } catch (err) {
+      alert(`Error saving purchase record: ${err.message}`);
+    }
+  };
+
+  const handleDeletePurchase = async (id) => {
+    if (window.confirm('Delete this purchase record?\nThis will permanently remove it from purchase history.')) {
+      try {
+        await storeService.deleteProductPurchase(id);
+        await loadAdminData();
+      } catch (err) {
+        alert(`Error deleting purchase record: ${err.message}`);
+      }
+    }
+  };
+
+  const handleOpenProductHistoryModal = (product) => {
+    setSelectedHistoryProduct(product);
+    setIsHistoryModalOpen(true);
+  };
+
 
   // -------------------------------------------------------------
   // PACKAGING MANAGEMENT HANDLERS (Part 14)
@@ -968,6 +1296,7 @@ export const Admin = () => {
     { id: 'orders', label: 'Orders', icon: <ShoppingBag size={18} />, badge: pendingOrdersCount > 0 ? pendingOrdersCount : null },
     { id: 'products', label: 'Products', icon: <Package size={18} /> },
     { id: 'categories', label: 'Categories', icon: <FolderTree size={18} /> },
+    { id: 'purchases', label: '📊 Product Purchase & Profit', icon: <TrendingUp size={18} /> },
     { id: 'packaging', label: 'Packaging', icon: <Gift size={18} /> },
     { id: 'cards', label: 'Handmade Cards', icon: <Mail size={18} /> },
     { id: 'inventory', label: 'Inventory', icon: <Boxes size={18} />, badge: lowStockCount > 0 ? lowStockCount : null, badgeColor: '#E65100' },
@@ -1383,9 +1712,32 @@ export const Admin = () => {
                             </select>
                           </td>
                           <td style={{ padding: '0.75rem', textAlign: 'right' }}>
-                            <Button variant="secondary" size="sm" onClick={() => setSelectedOrder(o)}>
-                              View Order
-                            </Button>
+                            <div style={{ display: 'inline-flex', gap: '0.4rem', alignItems: 'center', justifyContent: 'flex-end' }}>
+                              <Button variant="secondary" size="sm" onClick={() => setSelectedOrder(o)}>
+                                View Order
+                              </Button>
+                              {isOrderDeletable(o) && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleRequestDeleteOrder(o)}
+                                  className="btn-icon"
+                                  title="Delete unpaid/incomplete order"
+                                  style={{
+                                    color: '#DC2626',
+                                    background: '#FEE2E2',
+                                    padding: '6px',
+                                    borderRadius: '8px',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                  }}
+                                >
+                                  <Trash2 size={15} />
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1540,6 +1892,27 @@ export const Admin = () => {
                             <div style={{ display: 'inline-flex', gap: '0.4rem' }}>
                               <button
                                 type="button"
+                                onClick={() => handleOpenProductHistoryModal(p)}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '0.35rem',
+                                  fontSize: '0.78rem',
+                                  fontWeight: 600,
+                                  color: 'var(--lavender-deep)',
+                                  background: 'var(--lavender-soft)',
+                                  border: '1px solid var(--border-lavender)',
+                                  padding: '0.35rem 0.65rem',
+                                  borderRadius: '8px',
+                                  cursor: 'pointer',
+                                }}
+                                title="View Purchase History & Profit for this product"
+                              >
+                                <TrendingUp size={14} />
+                                <span>Purchase History</span>
+                              </button>
+                              <button
+                                type="button"
                                 onClick={() => handleOpenProductModal(p)}
                                 className="btn-icon"
                                 title="Edit Product"
@@ -1632,6 +2005,708 @@ export const Admin = () => {
                     )}
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* =========================================================
+              PART 13B: PRODUCT PURCHASE & PROFIT (Admin Only 🔒)
+              Wholesale records, supplier filtering, and auto calculations
+              ========================================================= */}
+          {activeTab === 'purchases' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+              {/* Header */}
+              <div
+                style={{
+                  background: '#FFFFFF',
+                  borderRadius: '20px',
+                  border: '1px solid var(--border-soft)',
+                  padding: '1.5rem',
+                  boxShadow: 'var(--shadow-sm)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '1rem',
+                }}
+              >
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <span style={{ fontSize: '1.4rem' }}>📊</span>
+                    <h3 className="font-serif" style={{ fontSize: '1.6rem', color: 'var(--text-main)', margin: 0 }}>
+                      Product Purchase & Profit
+                    </h3>
+                    <span
+                      style={{
+                        background: '#EDE9FE',
+                        color: 'var(--lavender-deep)',
+                        fontSize: '0.72rem',
+                        fontWeight: 700,
+                        padding: '2px 8px',
+                        borderRadius: 'var(--radius-full)',
+                        border: '1px solid #DDD6FE',
+                      }}
+                    >
+                      Admin Only 🔒
+                    </span>
+                  </div>
+                  <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
+                    Track wholesale purchases from suppliers, internal packaging costs, selling margins, and potential boutique profits.
+                  </p>
+                </div>
+
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => handleOpenPurchaseModal()}
+                  icon={<Plus size={16} />}
+                  style={{ width: 'auto', minWidth: '150px' }}
+                >
+                  + Add Purchase
+                </Button>
+              </div>
+
+              {/* Dynamic Summary Cards (4 Cards) */}
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+                  gap: '1rem',
+                }}
+              >
+                {/* 1. Total Invested */}
+                <div
+                  style={{
+                    background: '#FFF9E6',
+                    padding: '1.25rem',
+                    borderRadius: '16px',
+                    border: '1.5px solid #FDE68A',
+                    boxShadow: 'var(--shadow-sm)',
+                  }}
+                >
+                  <div style={{ fontSize: '0.76rem', color: '#B45309', textTransform: 'uppercase', fontWeight: 700, letterSpacing: '0.5px' }}>
+                    💰 Total Invested
+                  </div>
+                  <div style={{ fontSize: '1.85rem', fontWeight: 800, color: '#B45309', marginTop: '0.35rem' }}>
+                    ₹{purchaseSummaries.totalInvested.toLocaleString('en-IN')}
+                  </div>
+                  <div style={{ fontSize: '0.74rem', color: '#92400E', marginTop: '0.2rem' }}>
+                    sum(buying_price × quantity) • {purchaseSummaries.totalItems} pcs
+                  </div>
+                </div>
+
+                {/* 2. Estimated Total Revenue */}
+                <div
+                  style={{
+                    background: '#F0F9FF',
+                    padding: '1.25rem',
+                    borderRadius: '16px',
+                    border: '1.5px solid #BAE6FD',
+                    boxShadow: 'var(--shadow-sm)',
+                  }}
+                >
+                  <div style={{ fontSize: '0.76rem', color: '#0369A1', textTransform: 'uppercase', fontWeight: 700, letterSpacing: '0.5px' }}>
+                    🏷️ Estimated Total Revenue
+                  </div>
+                  <div style={{ fontSize: '1.85rem', fontWeight: 800, color: '#0284C7', marginTop: '0.35rem' }}>
+                    ₹{purchaseSummaries.estimatedRevenue.toLocaleString('en-IN')}
+                  </div>
+                  <div style={{ fontSize: '0.74rem', color: '#075985', marginTop: '0.2rem' }}>
+                    sum(selling_price_snapshot × quantity)
+                  </div>
+                </div>
+
+                {/* 3. Projected Gross Profit */}
+                <div
+                  style={{
+                    background: purchaseSummaries.projectedGrossProfit >= 0 ? '#F0FDF4' : '#FEF2F2',
+                    padding: '1.25rem',
+                    borderRadius: '16px',
+                    border: purchaseSummaries.projectedGrossProfit >= 0 ? '1.5px solid #86EFAC' : '1.5px solid #FCA5A5',
+                    boxShadow: 'var(--shadow-sm)',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '0.76rem', color: purchaseSummaries.projectedGrossProfit >= 0 ? '#15803D' : '#DC2626', textTransform: 'uppercase', fontWeight: 700, letterSpacing: '0.5px' }}>
+                      📈 Projected Gross Profit
+                    </span>
+                    {purchaseSummaries.totalInvested > 0 && (
+                      <span
+                        style={{
+                          fontSize: '0.68rem',
+                          background: purchaseSummaries.projectedGrossProfit >= 0 ? '#DCFCE7' : '#FEE2E2',
+                          color: purchaseSummaries.projectedGrossProfit >= 0 ? '#15803D' : '#DC2626',
+                          padding: '1px 6px',
+                          borderRadius: '4px',
+                          fontWeight: 700,
+                        }}
+                      >
+                        {Math.round((purchaseSummaries.projectedGrossProfit / purchaseSummaries.totalInvested) * 100)}% ROI
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: '1.85rem', fontWeight: 800, color: purchaseSummaries.projectedGrossProfit >= 0 ? '#16A34A' : '#DC2626', marginTop: '0.35rem' }}>
+                    ₹{purchaseSummaries.projectedGrossProfit.toLocaleString('en-IN')}
+                  </div>
+                  <div style={{ fontSize: '0.74rem', color: purchaseSummaries.projectedGrossProfit >= 0 ? '#166534' : '#991B1B', marginTop: '0.2rem' }}>
+                    sum((selling − buying − packaging) × quantity)
+                  </div>
+                </div>
+
+                {/* 4. Overall Margin % */}
+                <div
+                  style={{
+                    background: '#FAF5FF',
+                    padding: '1.25rem',
+                    borderRadius: '16px',
+                    border: '1.5px solid #E9D5FF',
+                    boxShadow: 'var(--shadow-sm)',
+                  }}
+                >
+                  <div style={{ fontSize: '0.76rem', color: '#7E22CE', textTransform: 'uppercase', fontWeight: 700, letterSpacing: '0.5px' }}>
+                    📊 Overall Margin %
+                  </div>
+                  <div style={{ fontSize: '1.85rem', fontWeight: 800, color: '#9333EA', marginTop: '0.35rem' }}>
+                    {purchaseSummaries.overallMarginPercent}%
+                  </div>
+                  <div style={{ fontSize: '0.74rem', color: '#6B21A8', marginTop: '0.2rem' }}>
+                    Projected Gross Profit ÷ Estimated Total Revenue × 100
+                  </div>
+                </div>
+              </div>
+
+              {/* Filters & Search Toolbar */}
+              <div
+                style={{
+                  background: '#FFFFFF',
+                  borderRadius: '20px',
+                  border: '1px solid var(--border-soft)',
+                  padding: '1.25rem',
+                  boxShadow: 'var(--shadow-sm)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '1rem',
+                }}
+              >
+                {/* Horizontally Scrollable Supplier Filter Chips */}
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+                    <label style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+                      Filter by Supplier:
+                    </label>
+                    {purchaseSupplierFilter !== 'ALL' && (
+                      <button
+                        type="button"
+                        onClick={() => setPurchaseSupplierFilter('ALL')}
+                        style={{ background: 'none', border: 'none', color: 'var(--lavender-deep)', fontSize: '0.76rem', fontWeight: 600, cursor: 'pointer' }}
+                      >
+                        Clear Supplier Filter
+                      </button>
+                    )}
+                  </div>
+
+                  <div
+                    style={{
+                      display: 'flex',
+                      gap: '0.5rem',
+                      overflowX: 'auto',
+                      paddingBottom: '0.4rem',
+                      WebkitOverflowScrolling: 'touch',
+                      scrollbarWidth: 'thin',
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setPurchaseSupplierFilter('ALL')}
+                      style={{
+                        padding: '0.45rem 0.9rem',
+                        borderRadius: '20px',
+                        border: '1px solid',
+                        borderColor: purchaseSupplierFilter === 'ALL' ? 'var(--lavender-deep)' : 'var(--border-soft)',
+                        background: purchaseSupplierFilter === 'ALL' ? 'var(--lavender-deep)' : '#FFFFFF',
+                        color: purchaseSupplierFilter === 'ALL' ? '#FFFFFF' : 'var(--text-main)',
+                        fontSize: '0.82rem',
+                        fontWeight: purchaseSupplierFilter === 'ALL' ? 700 : 500,
+                        cursor: 'pointer',
+                        whiteSpace: 'nowrap',
+                        transition: 'all 0.15s ease',
+                      }}
+                    >
+                      All Suppliers ({purchases.length})
+                    </button>
+
+                    {availableSuppliers.map((supp) => {
+                      const isSelected = purchaseSupplierFilter === supp;
+                      const count = purchases.filter((p) => p.supplierName === supp).length;
+                      return (
+                        <button
+                          key={supp}
+                          type="button"
+                          onClick={() => setPurchaseSupplierFilter(supp)}
+                          style={{
+                            padding: '0.45rem 0.9rem',
+                            borderRadius: '20px',
+                            border: '1px solid',
+                            borderColor: isSelected ? 'var(--lavender-deep)' : 'var(--border-soft)',
+                            background: isSelected ? 'var(--lavender-deep)' : '#FFFFFF',
+                            color: isSelected ? '#FFFFFF' : 'var(--text-main)',
+                            fontSize: '0.82rem',
+                            fontWeight: isSelected ? 700 : 500,
+                            cursor: 'pointer',
+                            whiteSpace: 'nowrap',
+                            transition: 'all 0.15s ease',
+                          }}
+                        >
+                          {supp} ({count})
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Secondary Search & Category Filters */}
+                <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                  {/* Search Bar */}
+                  <div style={{ position: 'relative', flex: '1 1 240px' }}>
+                    <Search size={16} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-light)' }} />
+                    <input
+                      type="text"
+                      placeholder="Search product name or supplier..."
+                      value={purchaseSearch}
+                      onChange={(e) => setPurchaseSearch(e.target.value)}
+                      style={{
+                        width: '100%',
+                        padding: '0.55rem 0.75rem 0.55rem 2.2rem',
+                        borderRadius: '10px',
+                        border: '1px solid var(--border-soft)',
+                        background: '#FFFFFF',
+                        fontSize: '0.85rem',
+                      }}
+                    />
+                    {purchaseSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setPurchaseSearch('')}
+                        style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#9CA3AF', cursor: 'pointer' }}
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Category Filter */}
+                  <select
+                    value={purchaseCategoryFilter}
+                    onChange={(e) => setPurchaseCategoryFilter(e.target.value)}
+                    style={{
+                      padding: '0.55rem 0.85rem',
+                      borderRadius: '10px',
+                      border: '1px solid var(--border-soft)',
+                      background: '#FFFFFF',
+                      fontSize: '0.85rem',
+                      minWidth: '160px',
+                    }}
+                  >
+                    <option value="ALL">All Categories</option>
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+
+                  {/* Date Filter */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <input
+                      type="date"
+                      value={purchaseDateFilter}
+                      onChange={(e) => setPurchaseDateFilter(e.target.value)}
+                      title="Filter by purchase date"
+                      style={{
+                        padding: '0.5rem 0.75rem',
+                        borderRadius: '10px',
+                        border: '1px solid var(--border-soft)',
+                        background: '#FFFFFF',
+                        fontSize: '0.82rem',
+                      }}
+                    />
+                    {purchaseDateFilter && (
+                      <button
+                        type="button"
+                        onClick={() => setPurchaseDateFilter('')}
+                        className="btn-icon"
+                        title="Clear date filter"
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </div>
+
+                  {(purchaseSearch || purchaseSupplierFilter !== 'ALL' || purchaseCategoryFilter !== 'ALL' || purchaseDateFilter) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPurchaseSearch('');
+                        setPurchaseSupplierFilter('ALL');
+                        setPurchaseCategoryFilter('ALL');
+                        setPurchaseDateFilter('');
+                      }}
+                      style={{
+                        background: '#F3F4F6',
+                        border: '1px solid #E5E7EB',
+                        borderRadius: '8px',
+                        padding: '0.5rem 0.75rem',
+                        fontSize: '0.8rem',
+                        fontWeight: 600,
+                        color: '#4B5563',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      Reset All Filters
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Purchase Records List (Responsive Desktop Table + Mobile Cards) */}
+              <div
+                style={{
+                  background: '#FFFFFF',
+                  borderRadius: '20px',
+                  border: '1px solid var(--border-soft)',
+                  padding: '1.5rem',
+                  boxShadow: 'var(--shadow-sm)',
+                }}
+              >
+                {filteredPurchases.length === 0 ? (
+                  <div style={{ textAlign: 'center', padding: '3.5rem 1rem' }}>
+                    <div style={{ fontSize: '2.5rem', marginBottom: '0.75rem' }}>📦</div>
+                    <h4 style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--text-main)', marginBottom: '0.4rem' }}>
+                      No purchase records found
+                    </h4>
+                    <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', maxWidth: '400px', margin: '0 auto 1.5rem' }}>
+                      {purchases.length === 0
+                        ? 'You haven’t recorded any wholesale product purchases yet. Click below to add your first batch.'
+                        : 'No records matched your search/filter criteria. Try changing or clearing your filters.'}
+                    </p>
+                    <Button variant="primary" size="sm" onClick={() => handleOpenPurchaseModal()} icon={<Plus size={16} />}>
+                      + Add Purchase Record
+                    </Button>
+                  </div>
+                ) : (
+                  <div>
+                    {/* Desktop Table */}
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.86rem' }}>
+                        <thead>
+                          <tr style={{ borderBottom: '2px solid var(--border-soft)', textAlign: 'left', color: 'var(--text-muted)' }}>
+                            <th style={{ padding: '0.75rem' }}>Product</th>
+                            <th style={{ padding: '0.75rem' }}>Supplier</th>
+                            <th style={{ padding: '0.75rem' }}>Purchase Date</th>
+                            <th style={{ padding: '0.75rem' }}>Buying Price</th>
+                            <th style={{ padding: '0.75rem' }}>Qty</th>
+                            <th style={{ padding: '0.75rem' }}>Pkg Cost</th>
+                            <th style={{ padding: '0.75rem' }}>Selling Price</th>
+                            <th style={{ padding: '0.75rem' }}>Total Investment</th>
+                            <th style={{ padding: '0.75rem' }}>Profit / Item</th>
+                            <th style={{ padding: '0.75rem' }}>Potential Profit</th>
+                            <th style={{ padding: '0.75rem', textAlign: 'right' }}>Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {filteredPurchases.map((p) => {
+                            const prod = productsMap[p.productId] || {};
+                            const qty = Number(p.quantity) || 1;
+                            const buyPrice = Number(p.buyingPrice) || 0;
+                            const packCost = Number(p.packagingCost) || 0;
+                            const sellPrice = p.sellingPriceSnapshot !== undefined && p.sellingPriceSnapshot !== null && Number(p.sellingPriceSnapshot) > 0
+                              ? Number(p.sellingPriceSnapshot)
+                              : Number(prod.price) || 0;
+
+                            const totalCostPerProduct = buyPrice + packCost;
+                            const profitPerItem = sellPrice - totalCostPerProduct;
+                            const totalInvestment = buyPrice * qty;
+                            const potentialProfit = profitPerItem * qty;
+                            const isProfitable = profitPerItem >= 0;
+
+                            return (
+                              <tr key={p.id} style={{ borderBottom: '1px solid var(--border-soft)' }}>
+                                {/* Product */}
+                                <td style={{ padding: '0.75rem' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.65rem' }}>
+                                    <img
+                                      src={prod.image || 'https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&w=150&q=80'}
+                                      alt={prod.name || 'Product'}
+                                      style={{ width: '42px', height: '42px', borderRadius: '8px', objectFit: 'cover', border: '1px solid var(--border-soft)', flexShrink: 0 }}
+                                    />
+                                    <div>
+                                      <div style={{ fontWeight: 700, color: 'var(--text-main)', fontSize: '0.88rem' }}>
+                                        {prod.name || 'Unknown Product'}
+                                      </div>
+                                      <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                                        {prod.categoryName || prod.category || 'Jewellery'} • {prod.sku || prod.id}
+                                      </div>
+                                    </div>
+                                  </div>
+                                </td>
+
+                                {/* Supplier */}
+                                <td style={{ padding: '0.75rem' }}>
+                                  <span
+                                    style={{
+                                      background: 'var(--lavender-soft)',
+                                      color: 'var(--lavender-deep)',
+                                      fontWeight: 600,
+                                      padding: '3px 8px',
+                                      borderRadius: '6px',
+                                      fontSize: '0.78rem',
+                                      display: 'inline-block',
+                                    }}
+                                  >
+                                    {p.supplierName}
+                                  </span>
+                                  {p.notes && (
+                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-light)', marginTop: '2px', maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.notes}>
+                                      💬 {p.notes}
+                                    </div>
+                                  )}
+                                </td>
+
+                                {/* Purchase Date */}
+                                <td style={{ padding: '0.75rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                                  {p.purchaseDate ? new Date(p.purchaseDate).toLocaleDateString() : '-'}
+                                </td>
+
+                                {/* Buying Price */}
+                                <td style={{ padding: '0.75rem', fontWeight: 700 }}>
+                                  ₹{buyPrice.toLocaleString('en-IN')}
+                                </td>
+
+                                {/* Qty */}
+                                <td style={{ padding: '0.75rem', fontWeight: 700 }}>
+                                  {qty} <span style={{ fontSize: '0.74rem', fontWeight: 500, color: 'var(--text-muted)' }}>pcs</span>
+                                </td>
+
+                                {/* Pkg Cost */}
+                                <td style={{ padding: '0.75rem', color: 'var(--text-muted)' }}>
+                                  ₹{packCost.toLocaleString('en-IN')}
+                                </td>
+
+                                {/* Selling Price */}
+                                <td style={{ padding: '0.75rem', fontWeight: 600 }}>
+                                  ₹{sellPrice.toLocaleString('en-IN')}
+                                </td>
+
+                                {/* Total Investment */}
+                                <td style={{ padding: '0.75rem', fontWeight: 700, color: '#B45309' }}>
+                                  ₹{totalInvestment.toLocaleString('en-IN')}
+                                </td>
+
+                                {/* Profit / Item */}
+                                <td style={{ padding: '0.75rem', fontWeight: 700, color: isProfitable ? '#16A34A' : '#DC2626' }}>
+                                  ₹{profitPerItem.toLocaleString('en-IN')}
+                                </td>
+
+                                {/* Potential Total Profit */}
+                                <td style={{ padding: '0.75rem', fontWeight: 800, color: isProfitable ? '#15803D' : '#B91C1C' }}>
+                                  ₹{potentialProfit.toLocaleString('en-IN')}
+                                </td>
+
+                                {/* Actions */}
+                                <td style={{ padding: '0.75rem', textAlign: 'right' }}>
+                                  <div style={{ display: 'inline-flex', gap: '0.35rem', alignItems: 'center' }}>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenProductHistoryModal(prod)}
+                                      className="btn-icon"
+                                      title="View all purchases for this product"
+                                      style={{ color: 'var(--lavender-deep)' }}
+                                    >
+                                      <TrendingUp size={15} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenPurchaseModal(p)}
+                                      className="btn-icon"
+                                      title="Edit Purchase Record"
+                                    >
+                                      <Edit2 size={15} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeletePurchase(p.id)}
+                                      className="btn-icon"
+                                      title="Delete Purchase Record"
+                                      style={{ color: '#DC2626' }}
+                                    >
+                                      <Trash2 size={15} />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Mobile Friendly Responsive Cards (Phone Admin UX) */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1.25rem' }}>
+                      {filteredPurchases.map((p) => {
+                        const prod = productsMap[p.productId] || {};
+                        const qty = Number(p.quantity) || 1;
+                        const buyPrice = Number(p.buyingPrice) || 0;
+                        const packCost = Number(p.packagingCost) || 0;
+                        const sellPrice = p.sellingPriceSnapshot !== undefined && p.sellingPriceSnapshot !== null && Number(p.sellingPriceSnapshot) > 0
+                          ? Number(p.sellingPriceSnapshot)
+                          : Number(prod.price) || 0;
+
+                        const totalCostPerProduct = buyPrice + packCost;
+                        const profitPerItem = sellPrice - totalCostPerProduct;
+                        const totalInvestment = buyPrice * qty;
+                        const potentialProfit = profitPerItem * qty;
+                        const isProfitable = profitPerItem >= 0;
+
+                        return (
+                          <div
+                            key={p.id}
+                            style={{
+                              border: '1px solid var(--border-soft)',
+                              borderRadius: '16px',
+                              padding: '1rem',
+                              background: '#FAF7FA',
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: '0.75rem',
+                            }}
+                          >
+                            {/* Card Header */}
+                            <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'flex-start' }}>
+                              <img
+                                src={prod.image || 'https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&w=150&q=80'}
+                                alt={prod.name || 'Product'}
+                                style={{ width: '52px', height: '52px', borderRadius: '10px', objectFit: 'cover', border: '1px solid var(--border-soft)', flexShrink: 0 }}
+                              />
+                              <div style={{ flex: 1 }}>
+                                <div style={{ fontWeight: 700, fontSize: '0.95rem', color: 'var(--text-main)', lineHeight: 1.3 }}>
+                                  {prod.name || 'Unknown Product'}
+                                </div>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                                  {prod.categoryName || prod.category || 'Jewellery'}
+                                </div>
+                                <div style={{ display: 'flex', gap: '0.4rem', marginTop: '0.35rem', flexWrap: 'wrap' }}>
+                                  <span style={{ background: 'var(--lavender-soft)', color: 'var(--lavender-deep)', fontSize: '0.72rem', fontWeight: 600, padding: '2px 7px', borderRadius: '6px' }}>
+                                    🏬 {p.supplierName}
+                                  </span>
+                                  <span style={{ background: '#FFFFFF', color: 'var(--text-muted)', fontSize: '0.72rem', padding: '2px 7px', borderRadius: '6px', border: '1px solid var(--border-soft)' }}>
+                                    📅 {p.purchaseDate || '-'}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Card Metric Grid */}
+                            <div
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(2, 1fr)',
+                                gap: '0.5rem',
+                                background: '#FFFFFF',
+                                padding: '0.75rem',
+                                borderRadius: '12px',
+                                border: '1px solid var(--border-soft)',
+                                fontSize: '0.8rem',
+                              }}
+                            >
+                              <div>
+                                <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.7rem' }}>BUYING PRICE:</span>
+                                <strong>₹{buyPrice.toLocaleString('en-IN')}</strong> / pc
+                              </div>
+                              <div>
+                                <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.7rem' }}>QUANTITY:</span>
+                                <strong>{qty} pcs</strong>
+                              </div>
+                              <div>
+                                <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.7rem' }}>SELLING PRICE:</span>
+                                <strong>₹{sellPrice.toLocaleString('en-IN')}</strong>
+                              </div>
+                              <div>
+                                <span style={{ color: 'var(--text-muted)', display: 'block', fontSize: '0.7rem' }}>PKG COST:</span>
+                                <strong>₹{packCost.toLocaleString('en-IN')}</strong>
+                              </div>
+                            </div>
+
+                            {/* Card Investment & Profit Totals Bar */}
+                            <div
+                              style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                background: isProfitable ? '#F0FDF4' : '#FEF2F2',
+                                border: isProfitable ? '1px solid #86EFAC' : '1px solid #FCA5A5',
+                                borderRadius: '10px',
+                                padding: '0.6rem 0.85rem',
+                              }}
+                            >
+                              <div>
+                                <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'block' }}>INVESTMENT</span>
+                                <strong style={{ color: '#B45309', fontSize: '0.95rem' }}>₹{totalInvestment.toLocaleString('en-IN')}</strong>
+                              </div>
+                              <div style={{ textAlign: 'center' }}>
+                                <span style={{ fontSize: '0.68rem', color: isProfitable ? '#166534' : '#991B1B', display: 'block' }}>PROFIT/ITEM</span>
+                                <strong style={{ color: isProfitable ? '#16A34A' : '#DC2626', fontSize: '0.95rem' }}>₹{profitPerItem.toLocaleString('en-IN')}</strong>
+                              </div>
+                              <div style={{ textAlign: 'right' }}>
+                                <span style={{ fontSize: '0.68rem', color: isProfitable ? '#166534' : '#991B1B', display: 'block' }}>POTENTIAL PROFIT</span>
+                                <strong style={{ color: isProfitable ? '#15803D' : '#B91C1C', fontSize: '1.05rem', fontWeight: 800 }}>₹{potentialProfit.toLocaleString('en-IN')}</strong>
+                              </div>
+                            </div>
+
+                            {p.notes && (
+                              <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', background: '#FFFFFF', padding: '0.4rem 0.6rem', borderRadius: '8px', border: '1px solid var(--border-soft)' }}>
+                                <strong>Notes:</strong> {p.notes}
+                              </div>
+                            )}
+
+                            {/* Mobile Action Buttons */}
+                            <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.25rem' }}>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => handleOpenProductHistoryModal(prod)}
+                                style={{ flex: 1, padding: '0.45rem', fontSize: '0.8rem' }}
+                              >
+                                History
+                              </Button>
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => handleOpenPurchaseModal(p)}
+                                style={{ flex: 1, padding: '0.45rem', fontSize: '0.8rem' }}
+                              >
+                                Edit
+                              </Button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeletePurchase(p.id)}
+                                style={{
+                                  background: '#FEE2E2',
+                                  color: '#DC2626',
+                                  border: 'none',
+                                  borderRadius: '8px',
+                                  padding: '0.45rem 0.85rem',
+                                  fontSize: '0.8rem',
+                                  fontWeight: 600,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -2312,6 +3387,34 @@ export const Admin = () => {
                 </select>
               </div>
             </div>
+
+            {isOrderDeletable(selectedOrder) && (
+              <div style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px dashed #FCA5A5', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: '0.78rem', color: '#DC2626' }}>
+                  ⚠️ Unpaid or incomplete order. Can be permanently removed.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleRequestDeleteOrder(selectedOrder)}
+                  style={{
+                    background: '#FEE2E2',
+                    color: '#DC2626',
+                    border: '1px solid #FCA5A5',
+                    borderRadius: '8px',
+                    padding: '0.45rem 0.85rem',
+                    fontSize: '0.82rem',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.35rem',
+                  }}
+                >
+                  <Trash2 size={14} />
+                  <span>Delete Order</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -2979,14 +4082,162 @@ export const Admin = () => {
                 />
               </div>
 
+              {/* Cover Image: Direct File Upload (Primary) + URL Fallback */}
               <div>
-                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: '0.3rem' }}>Cover Image URL</label>
-                <input
-                  type="url"
-                  value={categoryFormData.image}
-                  onChange={(e) => setCategoryFormData({ ...categoryFormData, image: e.target.value })}
-                  style={{ width: '100%', padding: '0.65rem', borderRadius: '8px', border: '1px solid var(--border-soft)' }}
-                />
+                <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: '0.35rem' }}>
+                  Category Cover Image
+                </label>
+
+                {/* Instant Preview Box */}
+                {categoryImagePreview ? (
+                  <div style={{ marginBottom: '0.75rem' }}>
+                    <div
+                      style={{
+                        position: 'relative',
+                        width: '100%',
+                        height: '160px',
+                        borderRadius: '12px',
+                        overflow: 'hidden',
+                        border: '1.5px solid var(--border-soft)',
+                        background: '#FAF7FA',
+                      }}
+                    >
+                      <img
+                        src={categoryImagePreview}
+                        alt="Category Preview"
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                      />
+                      {categoryImageUploading && (
+                        <div
+                          style={{
+                            position: 'absolute',
+                            inset: 0,
+                            background: 'rgba(255,255,255,0.75)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: '0.85rem',
+                            fontWeight: 700,
+                            color: 'var(--lavender-deep)',
+                          }}
+                        >
+                          ⏳ Uploading to storage...
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <label
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.4rem',
+                          padding: '0.45rem 0.85rem',
+                          background: 'var(--lavender-deep)',
+                          color: '#FFFFFF',
+                          borderRadius: '8px',
+                          fontSize: '0.8rem',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <Upload size={14} />
+                        <span>Change / Replace Image</span>
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/jpg,image/png,image/webp"
+                          style={{ display: 'none' }}
+                          onChange={handleCategoryImageSelect}
+                        />
+                      </label>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCategoryImageFile(null);
+                          setCategoryImagePreview('');
+                          setCategoryFormData((prev) => ({ ...prev, image: '' }));
+                        }}
+                        style={{
+                          background: '#FFEBEE',
+                          color: '#C62828',
+                          border: 'none',
+                          borderRadius: '8px',
+                          padding: '0.45rem 0.75rem',
+                          fontSize: '0.8rem',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '0.3rem',
+                        }}
+                      >
+                        <X size={14} />
+                        <span>Remove</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ marginBottom: '0.75rem' }}>
+                    <label
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '0.5rem',
+                        padding: '1.5rem',
+                        borderRadius: '12px',
+                        border: '2px dashed var(--border-lavender)',
+                        background: '#FAF7FA',
+                        cursor: 'pointer',
+                        textAlign: 'center',
+                        transition: 'all 0.2s',
+                      }}
+                    >
+                      <div style={{ background: 'var(--lavender-soft)', color: 'var(--lavender-deep)', padding: '0.6rem', borderRadius: '50%' }}>
+                        <Upload size={22} />
+                      </div>
+                      <div>
+                        <span style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--lavender-deep)' }}>
+                          Click to upload cover image
+                        </span>
+                        <div style={{ fontSize: '0.74rem', color: 'var(--text-light)', marginTop: '2px' }}>
+                          Supports JPG, JPEG, PNG, WEBP (Works from phone/desktop)
+                        </div>
+                      </div>
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/jpg,image/png,image/webp"
+                        style={{ display: 'none' }}
+                        onChange={handleCategoryImageSelect}
+                      />
+                    </label>
+                  </div>
+                )}
+
+                {categoryUploadError && (
+                  <div style={{ fontSize: '0.78rem', color: '#DC2626', background: '#FEE2E2', padding: '0.5rem 0.75rem', borderRadius: '8px', marginBottom: '0.5rem' }}>
+                    {categoryUploadError}
+                  </div>
+                )}
+
+                {/* Optional Fallback URL */}
+                <details style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '0.35rem' }}>
+                  <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Or enter Image URL manually (Optional fallback)</summary>
+                  <input
+                    type="url"
+                    placeholder="https://images.unsplash.com/..."
+                    value={categoryFormData.image}
+                    onChange={(e) => {
+                      setCategoryFormData({ ...categoryFormData, image: e.target.value });
+                      if (!categoryImageFile) {
+                        setCategoryImagePreview(e.target.value);
+                      }
+                    }}
+                    style={{ width: '100%', padding: '0.5rem 0.75rem', borderRadius: '8px', border: '1px solid var(--border-soft)', fontSize: '0.85rem', marginTop: '0.4rem' }}
+                  />
+                </details>
               </div>
 
               <div>
@@ -3300,6 +4551,648 @@ export const Admin = () => {
           </div>
         </div>
       )}
+
+      {/* =========================================================
+          ORDER DELETION CONFIRMATION MODAL (Part 9B)
+          ========================================================= */}
+      {orderToDelete && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.5)',
+            backdropFilter: 'blur(4px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '1rem',
+            zIndex: 1000,
+          }}
+          onClick={() => !isDeletingOrder && setOrderToDelete(null)}
+        >
+          <div
+            style={{
+              background: '#FFFFFF',
+              borderRadius: '20px',
+              maxWidth: '460px',
+              width: '100%',
+              padding: '1.75rem',
+              boxShadow: 'var(--shadow-lg)',
+              border: '1px solid var(--border-soft)',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', marginBottom: '1rem', color: '#DC2626' }}>
+              <div style={{ background: '#FEE2E2', padding: '0.6rem', borderRadius: '50%', display: 'flex' }}>
+                <AlertTriangle size={24} />
+              </div>
+              <div>
+                <h3 className="font-serif" style={{ fontSize: '1.4rem', color: '#1F2937', margin: 0 }}>
+                  Delete this order?
+                </h3>
+                <span style={{ fontSize: '0.8rem', color: '#DC2626', fontWeight: 600 }}>
+                  Permanent Action
+                </span>
+              </div>
+            </div>
+
+            <p style={{ fontSize: '0.9rem', color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: '1.25rem' }}>
+              This will permanently remove order <strong>#{orderToDelete.orderNumber}</strong> ({orderToDelete.customer?.fullName || 'Customer'}, ₹{orderToDelete.pricing?.total}) from the admin order list.
+            </p>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={isDeletingOrder}
+                onClick={() => setOrderToDelete(null)}
+              >
+                Cancel
+              </Button>
+              <button
+                type="button"
+                disabled={isDeletingOrder}
+                onClick={handleConfirmDeleteOrder}
+                style={{
+                  background: '#DC2626',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  borderRadius: '10px',
+                  padding: '0.55rem 1.1rem',
+                  fontSize: '0.88rem',
+                  fontWeight: 600,
+                  cursor: isDeletingOrder ? 'not-allowed' : 'pointer',
+                  opacity: isDeletingOrder ? 0.7 : 1,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                }}
+              >
+                <Trash2 size={16} />
+                <span>{isDeletingOrder ? 'Deleting...' : 'Delete Order'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================
+          PRODUCT PURCHASE ADD / EDIT MODAL (Part 13B)
+          ========================================================= */}
+      {isPurchaseModalOpen && (() => {
+        const selectedProd = productsMap[purchaseFormData.productId] || (products.length > 0 ? products[0] : null);
+        const buyPrice = Number(purchaseFormData.buyingPrice) || 0;
+        const qty = Math.max(1, parseInt(purchaseFormData.quantity, 10) || 1);
+        const packCost = Number(purchaseFormData.packagingCost) || 0;
+        const sellPrice = purchaseFormData.sellingPriceSnapshot !== undefined && purchaseFormData.sellingPriceSnapshot !== null && Number(purchaseFormData.sellingPriceSnapshot) > 0
+          ? Number(purchaseFormData.sellingPriceSnapshot)
+          : Number(selectedProd?.price) || 0;
+
+        const totalCostPerProduct = buyPrice + packCost;
+        const profitPerProduct = sellPrice - totalCostPerProduct;
+        const totalInvestment = buyPrice * qty;
+        const potentialProfit = profitPerProduct * qty;
+        const isProfitable = profitPerProduct >= 0;
+
+        // Filter products for the searchable selector
+        const matchingProds = products.filter((p) => {
+          if (!purchaseProductSearch.trim()) return true;
+          const term = purchaseProductSearch.toLowerCase();
+          return (p.name || '').toLowerCase().includes(term) || (p.sku || '').toLowerCase().includes(term);
+        });
+
+        return (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              background: 'rgba(0,0,0,0.5)',
+              backdropFilter: 'blur(4px)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '1rem',
+              zIndex: 999,
+            }}
+            onClick={() => setIsPurchaseModalOpen(false)}
+          >
+            <div
+              style={{
+                background: '#FFFFFF',
+                borderRadius: '24px',
+                maxWidth: '620px',
+                width: '100%',
+                maxHeight: '90vh',
+                overflowY: 'auto',
+                padding: '2rem',
+                boxShadow: 'var(--shadow-lg)',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', borderBottom: '1px solid var(--border-soft)', paddingBottom: '1rem' }}>
+                <div>
+                  <h3 className="font-serif" style={{ fontSize: '1.6rem', color: 'var(--text-main)', margin: 0 }}>
+                    {editingPurchase ? 'Edit Purchase Record' : 'Record Wholesale Purchase'}
+                  </h3>
+                  <span style={{ fontSize: '0.78rem', color: 'var(--lavender-deep)', fontWeight: 600 }}>
+                    Linked to Master Product • Admin Only 🔒
+                  </span>
+                </div>
+                <button type="button" onClick={() => setIsPurchaseModalOpen(false)} className="btn-icon">
+                  <X size={20} />
+                </button>
+              </div>
+
+              <form onSubmit={handleSavePurchase} style={{ display: 'flex', flexDirection: 'column', gap: '1.15rem' }}>
+                {/* 1. Master Product Selector */}
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-main)', marginBottom: '0.35rem' }}>
+                    Select Existing Product *
+                  </label>
+
+                  {/* Selected Product Card */}
+                  {selectedProd ? (
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: '0.75rem',
+                        padding: '0.85rem',
+                        background: '#FAF7FA',
+                        border: '1.5px solid var(--border-lavender)',
+                        borderRadius: '12px',
+                        marginBottom: '0.5rem',
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                        <img
+                          src={selectedProd.image || 'https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&w=150&q=80'}
+                          alt={selectedProd.name}
+                          style={{ width: '48px', height: '48px', borderRadius: '10px', objectFit: 'cover', border: '1px solid var(--border-soft)' }}
+                        />
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: '0.92rem', color: 'var(--text-main)' }}>
+                            {selectedProd.name}
+                          </div>
+                          <div style={{ fontSize: '0.76rem', color: 'var(--lavender-deep)', fontWeight: 600 }}>
+                            {selectedProd.categoryName || selectedProd.category} • Selling Price: ₹{selectedProd.price || 0}
+                          </div>
+                        </div>
+                      </div>
+
+                      <span style={{ fontSize: '0.72rem', background: '#EDE9FE', color: 'var(--lavender-deep)', fontWeight: 700, padding: '2px 8px', borderRadius: '6px' }}>
+                        Master Record
+                      </span>
+                    </div>
+                  ) : null}
+
+                  {/* Searchable Product Dropdown */}
+                  <div style={{ position: 'relative' }}>
+                    <div style={{ position: 'relative' }}>
+                      <Search size={14} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-light)' }} />
+                      <input
+                        type="text"
+                        placeholder="Search existing products by name or SKU to change..."
+                        value={purchaseProductSearch}
+                        onChange={(e) => setPurchaseProductSearch(e.target.value)}
+                        style={{
+                          width: '100%',
+                          padding: '0.45rem 0.65rem 0.45rem 2rem',
+                          borderRadius: '8px',
+                          border: '1px solid var(--border-soft)',
+                          fontSize: '0.8rem',
+                          background: '#FFFFFF',
+                        }}
+                      />
+                    </div>
+
+                    {purchaseProductSearch.trim() && (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: '100%',
+                          left: 0,
+                          right: 0,
+                          background: '#FFFFFF',
+                          borderRadius: '10px',
+                          border: '1px solid var(--border-soft)',
+                          boxShadow: 'var(--shadow-md)',
+                          maxHeight: '180px',
+                          overflowY: 'auto',
+                          zIndex: 50,
+                          marginTop: '4px',
+                        }}
+                      >
+                        {matchingProds.length === 0 ? (
+                          <div style={{ padding: '0.6rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                            No products match your search.
+                          </div>
+                        ) : (
+                          matchingProds.map((prod) => (
+                            <div
+                              key={prod.id}
+                              onClick={() => {
+                                handleSelectProductForPurchase(prod);
+                                setPurchaseProductSearch('');
+                              }}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.6rem',
+                                padding: '0.5rem 0.75rem',
+                                cursor: 'pointer',
+                                borderBottom: '1px solid #F3F4F6',
+                                background: purchaseFormData.productId === prod.id ? '#FAF7FA' : '#FFFFFF',
+                              }}
+                            >
+                              <img
+                                src={prod.image || 'https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&w=100&q=80'}
+                                alt={prod.name}
+                                style={{ width: '32px', height: '32px', borderRadius: '6px', objectFit: 'cover' }}
+                              />
+                              <div style={{ flex: 1, fontSize: '0.82rem' }}>
+                                <div style={{ fontWeight: 600 }}>{prod.name}</div>
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                                  ₹{prod.price} • {prod.categoryName || prod.category}
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* 2. Supplier & Purchase Date */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '1rem' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: '0.3rem' }}>
+                      Where Bought (Supplier / Wholesale Name) *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. ABC Jewellery Wholesale"
+                      value={purchaseFormData.supplierName}
+                      onChange={(e) => setPurchaseFormData({ ...purchaseFormData, supplierName: e.target.value })}
+                      style={{ width: '100%', padding: '0.65rem', borderRadius: '8px', border: '1px solid var(--border-soft)', fontSize: '0.85rem' }}
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: '0.3rem' }}>
+                      Purchase Date *
+                    </label>
+                    <input
+                      type="date"
+                      required
+                      value={purchaseFormData.purchaseDate}
+                      onChange={(e) => setPurchaseFormData({ ...purchaseFormData, purchaseDate: e.target.value })}
+                      style={{ width: '100%', padding: '0.65rem', borderRadius: '8px', border: '1px solid var(--border-soft)', fontSize: '0.85rem' }}
+                    />
+                  </div>
+                </div>
+
+                {/* 3. Buying Price, Quantity, Packaging Cost */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '1rem' }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: '0.3rem' }}>
+                      Buying Price Each (₹) *
+                    </label>
+                    <input
+                      type="number"
+                      required
+                      min="0"
+                      step="0.01"
+                      placeholder="e.g. 50"
+                      value={purchaseFormData.buyingPrice}
+                      onChange={(e) => setPurchaseFormData({ ...purchaseFormData, buyingPrice: e.target.value })}
+                      style={{ width: '100%', padding: '0.65rem', borderRadius: '8px', border: '1px solid var(--border-soft)', fontSize: '0.85rem' }}
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: '0.3rem' }}>
+                      Quantity Bought *
+                    </label>
+                    <input
+                      type="number"
+                      required
+                      min="1"
+                      placeholder="e.g. 20"
+                      value={purchaseFormData.quantity}
+                      onChange={(e) => setPurchaseFormData({ ...purchaseFormData, quantity: e.target.value })}
+                      style={{ width: '100%', padding: '0.65rem', borderRadius: '8px', border: '1px solid var(--border-soft)', fontSize: '0.85rem' }}
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: '0.3rem' }}>
+                      Packaging Cost (₹)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="Internal cost, e.g. 35"
+                      value={purchaseFormData.packagingCost}
+                      onChange={(e) => setPurchaseFormData({ ...purchaseFormData, packagingCost: e.target.value })}
+                      style={{ width: '100%', padding: '0.65rem', borderRadius: '8px', border: '1px solid var(--border-soft)', fontSize: '0.85rem' }}
+                    />
+                  </div>
+                </div>
+
+                {/* 4. Live Automatic Calculations Box */}
+                <div
+                  style={{
+                    background: '#FAF7FA',
+                    border: '1.5px solid var(--border-lavender)',
+                    borderRadius: '16px',
+                    padding: '1.25rem',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                    <span style={{ fontSize: '0.82rem', fontWeight: 700, color: 'var(--lavender-deep)', textTransform: 'uppercase' }}>
+                      ⚡ Automatic Live Calculations
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      Selling Price: ₹{sellPrice.toLocaleString('en-IN')}
+                    </span>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '0.75rem' }}>
+                    <div style={{ background: '#FFFFFF', padding: '0.75rem', borderRadius: '10px', border: '1px solid var(--border-soft)' }}>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'block' }}>TOTAL COST/ITEM</span>
+                      <strong style={{ fontSize: '1.1rem', color: '#1F2937' }}>₹{totalCostPerProduct.toLocaleString('en-IN')}</strong>
+                      <div style={{ fontSize: '0.65rem', color: 'var(--text-light)', marginTop: '2px' }}>₹{buyPrice} + ₹{packCost}</div>
+                    </div>
+
+                    <div style={{ background: '#FFFFFF', padding: '0.75rem', borderRadius: '10px', border: '1px solid var(--border-soft)' }}>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', display: 'block' }}>PROFIT / ITEM</span>
+                      <strong style={{ fontSize: '1.1rem', color: isProfitable ? '#16A34A' : '#DC2626' }}>₹{profitPerProduct.toLocaleString('en-IN')}</strong>
+                      <div style={{ fontSize: '0.65rem', color: isProfitable ? '#166534' : '#991B1B', marginTop: '2px' }}>Selling − Total Cost</div>
+                    </div>
+
+                    <div style={{ background: '#FFF9E6', padding: '0.75rem', borderRadius: '10px', border: '1px solid #FDE68A' }}>
+                      <span style={{ fontSize: '0.68rem', color: '#B45309', display: 'block' }}>TOTAL INVESTMENT</span>
+                      <strong style={{ fontSize: '1.1rem', color: '#B45309' }}>₹{totalInvestment.toLocaleString('en-IN')}</strong>
+                      <div style={{ fontSize: '0.65rem', color: '#92400E', marginTop: '2px' }}>₹{buyPrice} × {qty} pcs</div>
+                    </div>
+
+                    <div style={{ background: isProfitable ? '#F0FDF4' : '#FEF2F2', padding: '0.75rem', borderRadius: '10px', border: isProfitable ? '1px solid #86EFAC' : '1px solid #FCA5A5' }}>
+                      <span style={{ fontSize: '0.68rem', color: isProfitable ? '#166534' : '#991B1B', display: 'block' }}>POTENTIAL PROFIT</span>
+                      <strong style={{ fontSize: '1.1rem', color: isProfitable ? '#15803D' : '#DC2626' }}>₹{potentialProfit.toLocaleString('en-IN')}</strong>
+                      <div style={{ fontSize: '0.65rem', color: isProfitable ? '#166534' : '#991B1B', marginTop: '2px' }}>Profit/pc × {qty} pcs</div>
+                    </div>
+                  </div>
+
+                  {sellPrice <= 0 && (
+                    <div style={{ marginTop: '0.75rem', fontSize: '0.75rem', color: '#DC2626', background: '#FEE2E2', padding: '0.4rem 0.6rem', borderRadius: '6px' }}>
+                      ⚠️ Notice: The selected product has no selling price configured in Products Catalogue.
+                    </div>
+                  )}
+                </div>
+
+                {/* 5. Notes */}
+                <div>
+                  <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: '0.3rem' }}>
+                    Notes (Optional)
+                  </label>
+                  <textarea
+                    rows={2}
+                    placeholder="Batch details, supplier contact, specific color / variety, etc..."
+                    value={purchaseFormData.notes}
+                    onChange={(e) => setPurchaseFormData({ ...purchaseFormData, notes: e.target.value })}
+                    style={{ width: '100%', padding: '0.65rem', borderRadius: '8px', border: '1px solid var(--border-soft)', fontSize: '0.85rem' }}
+                  />
+                </div>
+
+                {/* Actions */}
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem', marginTop: '0.5rem' }}>
+                  <Button type="button" variant="outline" onClick={() => setIsPurchaseModalOpen(false)}>
+                    Cancel
+                  </Button>
+                  <Button type="submit" variant="primary">
+                    {editingPurchase ? 'Update Purchase Record' : 'Save Purchase Record'}
+                  </Button>
+                </div>
+              </form>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* =========================================================
+          PRODUCT PURCHASE HISTORY DRILLDOWN MODAL (Part 13C)
+          ========================================================= */}
+      {isHistoryModalOpen && selectedHistoryProduct && (() => {
+        const prodPurchases = purchases.filter((p) => String(p.productId) === String(selectedHistoryProduct.id));
+        let totalPcs = 0;
+        let totalInvest = 0;
+        let totalProfit = 0;
+
+        prodPurchases.forEach((p) => {
+          const qty = Number(p.quantity) || 1;
+          const buyPrice = Number(p.buyingPrice) || 0;
+          const packCost = Number(p.packagingCost) || 0;
+          const sellPrice = p.sellingPriceSnapshot !== undefined && p.sellingPriceSnapshot !== null && Number(p.sellingPriceSnapshot) > 0
+            ? Number(p.sellingPriceSnapshot)
+            : Number(selectedHistoryProduct.price) || 0;
+
+          totalPcs += qty;
+          totalInvest += buyPrice * qty;
+          totalProfit += (sellPrice - buyPrice - packCost) * qty;
+        });
+
+        return (
+          <div
+            style={{
+              position: 'fixed',
+              inset: 0,
+              background: 'rgba(0,0,0,0.5)',
+              backdropFilter: 'blur(4px)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '1rem',
+              zIndex: 1000,
+            }}
+            onClick={() => setIsHistoryModalOpen(false)}
+          >
+            <div
+              style={{
+                background: '#FFFFFF',
+                borderRadius: '24px',
+                maxWidth: '640px',
+                width: '100%',
+                maxHeight: '90vh',
+                overflowY: 'auto',
+                padding: '2rem',
+                boxShadow: 'var(--shadow-lg)',
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Modal Header */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.25rem', borderBottom: '1px solid var(--border-soft)', paddingBottom: '1rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <img
+                    src={selectedHistoryProduct.image || 'https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&w=150&q=80'}
+                    alt={selectedHistoryProduct.name}
+                    style={{ width: '48px', height: '48px', borderRadius: '10px', objectFit: 'cover', border: '1px solid var(--border-soft)' }}
+                  />
+                  <div>
+                    <h3 className="font-serif" style={{ fontSize: '1.4rem', color: 'var(--text-main)', margin: 0 }}>
+                      {selectedHistoryProduct.name}
+                    </h3>
+                    <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                      Purchase History • Selling Price: ₹{selectedHistoryProduct.price || 0}
+                    </div>
+                  </div>
+                </div>
+                <button type="button" onClick={() => setIsHistoryModalOpen(false)} className="btn-icon">
+                  <X size={20} />
+                </button>
+              </div>
+
+              {/* Product Totals Summary Banner */}
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(3, 1fr)',
+                  gap: '0.75rem',
+                  background: '#FAF7FA',
+                  border: '1.5px solid var(--border-lavender)',
+                  borderRadius: '14px',
+                  padding: '1rem',
+                  marginBottom: '1.25rem',
+                  textAlign: 'center',
+                }}
+              >
+                <div>
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Total Purchased</span>
+                  <div style={{ fontSize: '1.3rem', fontWeight: 800, color: 'var(--text-main)', marginTop: '2px' }}>
+                    {totalPcs} <span style={{ fontSize: '0.8rem', fontWeight: 500 }}>pcs</span>
+                  </div>
+                </div>
+                <div>
+                  <span style={{ fontSize: '0.7rem', color: '#B45309', textTransform: 'uppercase' }}>Total Investment</span>
+                  <div style={{ fontSize: '1.3rem', fontWeight: 800, color: '#B45309', marginTop: '2px' }}>
+                    ₹{totalInvest.toLocaleString('en-IN')}
+                  </div>
+                </div>
+                <div>
+                  <span style={{ fontSize: '0.7rem', color: totalProfit >= 0 ? '#15803D' : '#DC2626', textTransform: 'uppercase' }}>Potential Profit</span>
+                  <div style={{ fontSize: '1.3rem', fontWeight: 800, color: totalProfit >= 0 ? '#16A34A' : '#DC2626', marginTop: '2px' }}>
+                    ₹{totalProfit.toLocaleString('en-IN')}
+                  </div>
+                </div>
+              </div>
+
+              {/* Historical Records List */}
+              <div style={{ marginBottom: '1.5rem' }}>
+                <h4 style={{ fontSize: '0.9rem', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 700, marginBottom: '0.75rem' }}>
+                  Purchase Records ({prodPurchases.length})
+                </h4>
+
+                {prodPurchases.length === 0 ? (
+                  <p style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '2rem 1rem', fontSize: '0.85rem' }}>
+                    No wholesale purchases recorded yet for this product.
+                  </p>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                    {prodPurchases.map((p, idx) => {
+                      const qty = Number(p.quantity) || 1;
+                      const buyPrice = Number(p.buyingPrice) || 0;
+                      const packCost = Number(p.packagingCost) || 0;
+                      const totalBatchCost = buyPrice * qty;
+
+                      return (
+                        <div
+                          key={p.id}
+                          style={{
+                            border: '1px solid var(--border-soft)',
+                            borderRadius: '12px',
+                            padding: '0.85rem 1rem',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            background: '#FFFFFF',
+                          }}
+                        >
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                              <span style={{ fontWeight: 700, fontSize: '0.9rem' }}>
+                                #{idx + 1}. {p.supplierName}
+                              </span>
+                              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', background: '#F3F4F6', padding: '1px 6px', borderRadius: '4px' }}>
+                                {p.purchaseDate || '-'}
+                              </span>
+                            </div>
+                            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '3px' }}>
+                              {qty} pieces • ₹{buyPrice} each {packCost > 0 ? `(+₹${packCost} packaging)` : ''}
+                            </div>
+                            {p.notes && (
+                              <div style={{ fontSize: '0.72rem', color: 'var(--text-light)', marginTop: '2px' }}>
+                                💬 {p.notes}
+                              </div>
+                            )}
+                          </div>
+
+                          <div style={{ textAlign: 'right' }}>
+                            <div style={{ fontSize: '1rem', fontWeight: 800, color: '#B45309' }}>
+                              ₹{totalBatchCost.toLocaleString('en-IN')}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIsHistoryModalOpen(false);
+                                handleOpenPurchaseModal(p);
+                              }}
+                              style={{
+                                background: 'none',
+                                border: 'none',
+                                color: 'var(--lavender-deep)',
+                                fontSize: '0.75rem',
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                                padding: 0,
+                                marginTop: '2px',
+                              }}
+                            >
+                              Edit Record
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Bottom Action */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid var(--border-soft)', paddingTop: '1rem' }}>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={() => {
+                    setIsHistoryModalOpen(false);
+                    handleOpenPurchaseModal(null, selectedHistoryProduct);
+                  }}
+                  icon={<Plus size={15} />}
+                >
+                  + Add Purchase for this Product
+                </Button>
+
+                <Button variant="outline" size="sm" onClick={() => setIsHistoryModalOpen(false)}>
+                  Close
+                </Button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

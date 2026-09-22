@@ -32,13 +32,26 @@ export const ShopProvider = ({ children }) => {
   });
   const [isLoading, setIsLoading] = useState(true);
 
-  // Wishlist persisted in localStorage
+  // Wishlist persisted in localStorage (dynamic, defaults to empty)
   const [wishlist, setWishlist] = useState(() => {
     try {
+      // Clear legacy hardcoded seed ['prod-1', 'prod-3'] if present from previous code
+      const legacyCleared = localStorage.getItem('dreambasket_wishlist_clean_v1');
       const saved = localStorage.getItem('dreambasket_wishlist');
-      return saved ? JSON.parse(saved) : ['prod-1', 'prod-3'];
+      if (!legacyCleared) {
+        localStorage.setItem('dreambasket_wishlist_clean_v1', 'true');
+        if (saved === '["prod-1","prod-3"]' || saved === '["prod-1", "prod-3"]') {
+          localStorage.removeItem('dreambasket_wishlist');
+          return [];
+        }
+      }
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return Array.isArray(parsed) ? parsed : [];
+      }
+      return [];
     } catch {
-      return ['prod-1', 'prod-3'];
+      return [];
     }
   });
 

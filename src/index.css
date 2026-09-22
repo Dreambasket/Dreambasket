@@ -869,28 +869,67 @@ button {
   justify-content: center;
 }
 
+.hero-card-wrapper {
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+  margin: 0 auto;
+}
+
 .hero-image-card {
   position: relative;
   width: 100%;
-  max-width: 440px;
   border-radius: 28px;
   overflow: hidden;
   box-shadow: var(--shadow-lg);
   border: 6px solid #FFFFFF;
   background: #FFF0F6;
-  aspect-ratio: 4 / 4.8;
+  aspect-ratio: 3 / 4;
 }
 
 .hero-image-card img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  object-position: center;
+  display: block;
+}
+
+.hero-logo-badge {
+  position: absolute;
+  top: -18px;
+  right: -18px;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  border: 4px solid #FFFFFF;
+  box-shadow: 0 10px 25px rgba(185, 155, 220, 0.38);
+  background: #FFFFFF;
+  overflow: hidden;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: floatSlow 5s ease-in-out infinite;
+  transition: transform 0.3s ease;
+}
+
+.hero-logo-badge:hover {
+  transform: scale(1.05);
+}
+
+.hero-logo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  border-radius: 50%;
 }
 
 .hero-floating-badge {
   position: absolute;
   bottom: 20px;
-  left: -12px;
+  left: -14px;
   background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(8px);
   padding: 0.75rem 1.1rem;
@@ -900,6 +939,7 @@ button {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  z-index: 3;
   animation: floatSlow 4s ease-in-out infinite;
 }
 
@@ -917,6 +957,24 @@ button {
   align-items: center;
   justify-content: center;
   font-size: 1.1rem;
+}
+
+@media (max-width: 640px) {
+  .hero-card-wrapper {
+    max-width: 330px;
+  }
+  .hero-logo-badge {
+    width: 84px;
+    height: 84px;
+    top: -12px;
+    right: 0px;
+    border-width: 3px;
+  }
+  .hero-floating-badge {
+    bottom: 12px;
+    left: 8px;
+    padding: 0.55rem 0.85rem;
+  }
 }
 
 /* Made to Match / Combo Feature Section */

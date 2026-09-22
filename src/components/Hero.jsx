@@ -2,6 +2,8 @@ import React from 'react';
 import { Sparkles, Heart } from 'lucide-react';
 import { Button } from './Button';
 import { useShop } from '../context/ShopContext';
+import heroJewelleryImg from '../assets/dreambasket-hero-jewellery.png';
+import dreambasketLogoImg from '../assets/dreambasket-logo.jpg';
 
 export const Hero = () => {
   const { storeSettings } = useShop();
@@ -50,12 +52,23 @@ export const Hero = () => {
 
           {/* Visual Column */}
           <div className="hero-visual">
-            <div className="hero-image-card">
-              <img
-                src="https://images.unsplash.com/photo-1535632066927-ab7c9ab60908?auto=format&fit=crop&w=900&q=85"
-                alt="Dreambasket curated pastel jewellery display with bows and pearls"
-                loading="eager"
-              />
+            <div className="hero-card-wrapper">
+              <div className="hero-image-card">
+                <img
+                  src={heroJewelleryImg}
+                  alt="Dreambasket handcrafted butterfly jewellery collection with earrings and pendant necklace"
+                  loading="eager"
+                />
+              </div>
+
+              {/* Official Dreambasket Logo Emblem */}
+              <div className="hero-logo-badge" title="Official Dreambasket Logo">
+                <img
+                  src={dreambasketLogoImg}
+                  alt="Official Dreambasket Logo"
+                  className="hero-logo-img"
+                />
+              </div>
 
               {/* Floating aesthetic badge */}
               <div className="hero-floating-badge">
